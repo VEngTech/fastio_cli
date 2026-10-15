@@ -8,7 +8,7 @@ const path = require("path");
 const os = require("os");
 const { URL } = require("url");
 
-const REPO = "MediaFire/fastio_cli";
+const REPO = "VEngTech/fastio_cli";
 const VERSION = require("./package.json").version;
 
 const MAX_REDIRECTS = 10;

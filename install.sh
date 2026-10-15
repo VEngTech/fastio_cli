@@ -1,10 +1,10 @@
 #!/bin/sh
 # Fast.io CLI installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/MediaFire/fastio_cli/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/VEngTech/fastio_cli/main/install.sh | sh
 
 set -e
 
-REPO="MediaFire/fastio_cli"
+REPO="VEngTech/fastio_cli"
 INSTALL_DIR="${FASTIO_INSTALL_DIR:-/usr/local/bin}"
 
 # Detect OS and architecture

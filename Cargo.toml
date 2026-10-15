@@ -10,7 +10,7 @@ homepage = "https://fast.io"
 keywords = ["cli", "cloud-storage", "fast-io", "file-management", "mcp"]
 categories = ["command-line-utilities"]
 readme = "README.md"
-# repository = "https://github.com/MediaFire/fastio_cli"
+# repository = "https://github.com/VEngTech/fastio_cli"
 
 [[bin]]
 name = "fastio"
