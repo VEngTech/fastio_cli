@@ -19,7 +19,7 @@ npx @vividengine/fastio-cli --help
 ### Shell script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MediaFire/fastio_cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/VEngTech/fastio_cli/main/install.sh | sh
 ```
 
 ### Binary download

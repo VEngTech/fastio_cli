@@ -29,7 +29,7 @@ fastio upload file --workspace <ID> ./myfile.txt
 
 ## Documentation
 
-See the [GitHub repository](https://github.com/MediaFire/fastio_cli) for full documentation.
+See the [GitHub repository](https://github.com/VEngTech/fastio_cli) for full documentation.
 
 ## License
 
