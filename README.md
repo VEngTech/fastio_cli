@@ -225,7 +225,7 @@ Pipelines that need machine-parseable output can opt back in with
 
 | Group | Description |
 |-------|-------------|
-| `ripley` | Fastio's delegated AI agent — ask, chat, history, message management, `summary`, `transactions` (`ai` is a hidden alias). Searching is not a Ripley verb — use `search` |
+| `ripley` | Fastio's delegated AI agent — ask, chat, history, message management, `summary`, `transactions` (`ai` is a hidden alias). `--effort normal\|high` picks the reply effort per message. Searching is not a Ripley verb — use `search` |
 
 ### Platform
 
