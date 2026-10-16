@@ -30,7 +30,7 @@ detect_platform() {
 
 # Get the latest release tag from GitHub
 get_latest_version() {
-    curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --max-time 30 "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep '"tag_name"' \
         | head -1 \
         | sed 's/.*"tag_name": *"//;s/".*//'
@@ -83,12 +83,12 @@ main() {
     TMP=$(mktemp -d)
     trap 'rm -rf "$TMP"' EXIT
 
-    if ! curl -fsSL -o "${TMP}/fastio" "$URL"; then
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 -o "${TMP}/fastio" "$URL"; then
         echo "Error: download failed. Check that a release exists for your platform." >&2
         exit 1
     fi
 
-    if ! curl -fsSL -o "${TMP}/SHA256SUMS" "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS"; then
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --max-time 30 -o "${TMP}/SHA256SUMS" "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS"; then
         echo "Error: could not download SHA256SUMS for ${VERSION}" >&2
         exit 1
     fi

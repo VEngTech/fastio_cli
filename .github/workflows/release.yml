@@ -126,6 +126,8 @@ jobs:
   release:
     name: Create Release
     needs: build
+    # A manual dispatch on a branch builds every target but never publishes; only a tag releases.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -156,6 +158,7 @@ jobs:
   publish-npm:
     name: Publish to npm
     needs: release
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
