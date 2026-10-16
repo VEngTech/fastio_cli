@@ -2271,6 +2271,7 @@ fn map_ripley_command(cmd: cli::RipleyCommands) -> AiCommand {
             kind,
             no_wait,
             idempotency_key,
+            effort,
         } => {
             let (profile_type, profile_id) = resolve_workspace_or_share_profile(workspace, share);
             AiCommand::Ask {
@@ -2286,6 +2287,7 @@ fn map_ripley_command(cmd: cli::RipleyCommands) -> AiCommand {
                 kind,
                 no_wait,
                 idempotency_key,
+                effort,
             }
         }
         cli::RipleyCommands::List {
@@ -2409,6 +2411,7 @@ fn map_ripley_command(cmd: cli::RipleyCommands) -> AiCommand {
             folder_id,
             intelligence,
             idempotency_key,
+            effort,
         } => AiCommand::Chat {
             workspace,
             message,
@@ -2420,6 +2423,7 @@ fn map_ripley_command(cmd: cli::RipleyCommands) -> AiCommand {
             folder_id,
             intelligence,
             idempotency_key,
+            effort,
         },
         cli::RipleyCommands::History {
             workspace,

@@ -5348,6 +5348,13 @@ pub enum RipleyCommands {
         /// send prints the key it used, for exactly this purpose.
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Reply effort for this message: `normal` (default) or `high`.
+        ///
+        /// `high` reasons more deeply with no per-reply step limit; replies are
+        /// slower and use more credits. Effort applies to one message — pass it
+        /// again on each follow-up that should use it.
+        #[arg(long, value_parser = fastio_cli::api::ai::EFFORT_VALUES)]
+        effort: Option<String>,
     },
     /// Send a chat message and get the AI response.
     Chat {
@@ -5393,6 +5400,13 @@ pub enum RipleyCommands {
         /// send prints the key it used, for exactly this purpose.
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Reply effort for this message: `normal` (default) or `high`.
+        ///
+        /// `high` reasons more deeply with no per-reply step limit; replies are
+        /// slower and use more credits. Effort applies to one message — pass it
+        /// again on each follow-up that should use it.
+        #[arg(long, value_parser = fastio_cli::api::ai::EFFORT_VALUES)]
+        effort: Option<String>,
     },
     /// Get chat message history.
     History {

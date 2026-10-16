@@ -73,6 +73,28 @@ pub struct ChatCreateOptions {
     /// `None` makes one up; see [`new_idempotency_key`] for why the client
     /// generates it rather than letting the server.
     pub idempotency_key: Option<String>,
+    /// Reply effort for the FIRST turn — one of [`EFFORT_VALUES`]. `None`
+    /// omits the field (the server default, `normal`). See [`insert_effort`].
+    pub effort: Option<String>,
+}
+
+/// The reply-effort values the `/ai/agent/` create and send-message endpoints
+/// accept. `normal` is the server default; `high` reasons more deeply with no
+/// per-reply step budget, at the cost of slower replies and more credits.
+pub const EFFORT_VALUES: [&str; 2] = ["normal", "high"];
+
+/// Insert the per-turn `effort` field when the caller chose one.
+///
+/// Effort is per MESSAGE, not per chat: the server does not remember it, so a
+/// caller that wants `high` for a follow-up must send it again on that
+/// follow-up. `None` omits the field, which the server treats as `normal`.
+pub fn insert_effort<S: std::hash::BuildHasher>(
+    form: &mut HashMap<String, String, S>,
+    effort: Option<&str>,
+) {
+    if let Some(e) = effort {
+        form.insert("effort".to_owned(), e.to_owned());
+    }
 }
 
 /// Mint a per-turn idempotency key.
@@ -139,6 +161,7 @@ pub async fn create_chat(
     }
     apply_scope(&mut form, &options.scope);
     insert_idempotency_key(&mut form, options.idempotency_key.as_deref());
+    insert_effort(&mut form, options.effort.as_deref());
     let path = format!("/workspace/{}/ai/agent/", urlencoding::encode(workspace_id),);
     client.post(&path, &form).await
 }
@@ -270,7 +293,9 @@ pub fn build_subjects(scope: &ChatScope) -> Option<String> {
 /// The chat type is inherited from the chat, so `type` is not resent;
 /// `personality` is dead on the migrated endpoint and also not sent.
 /// File/folder context uses the single structured `references` field (see
-/// [`ChatScope`] / [`build_references`]).
+/// [`ChatScope`] / [`build_references`]). `effort` is per message — see
+/// [`insert_effort`].
+#[allow(clippy::too_many_arguments)]
 pub async fn send_message(
     client: &ApiClient,
     workspace_id: &str,
@@ -279,6 +304,7 @@ pub async fn send_message(
     personality: Option<&str>,
     scope: &ChatScope,
     idempotency_key: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<Value, CliError> {
     // `personality` is dead on /ai/agent; the param is kept for signature
     // compat (callers still pass it) but no longer inserted into the form.
@@ -287,6 +313,7 @@ pub async fn send_message(
     form.insert("question".to_owned(), question.to_owned());
     apply_scope(&mut form, scope);
     insert_idempotency_key(&mut form, idempotency_key);
+    insert_effort(&mut form, effort);
     let path = format!(
         "/workspace/{}/ai/agent/{}/message/",
         urlencoding::encode(workspace_id),
@@ -948,6 +975,30 @@ pub fn answer_was_truncated(msg: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the reply stopped at its per-reply step budget
+/// (`result.turn_limit_reached`).
+///
+/// Only a `normal`-effort reply can set it. The answer may be incomplete, but
+/// the chat is intact: an ordinary follow-up message in the same chat (e.g.
+/// `Continue`) lets the assistant pick up where it left off. Missing or
+/// non-boolean reads as `false` (turns created before the field existed).
+#[must_use]
+pub fn turn_limit_reached(msg: &Value) -> bool {
+    msg.get("result")
+        .and_then(|r| r.get("turn_limit_reached"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The effort a turn was sent with (`query.effort`), when the server echoed one.
+#[must_use]
+pub fn turn_effort(msg: &Value) -> Option<&str> {
+    msg.get("query")
+        .and_then(|q| q.get("effort"))
+        .and_then(Value::as_str)
+        .filter(|e| !e.is_empty())
+}
+
 /// Extract the clarifying question from a `needs_input` agent message-details
 /// body, if present.
 ///
@@ -1026,6 +1077,31 @@ mod tests {
                 "key must be URL-safe: {k}"
             );
         }
+    }
+
+    #[test]
+    fn effort_is_sent_only_when_chosen() {
+        let mut form = std::collections::HashMap::new();
+        super::insert_effort(&mut form, None);
+        assert!(!form.contains_key("effort"), "absent ⇒ server default");
+        super::insert_effort(&mut form, Some("high"));
+        assert_eq!(form.get("effort").map(String::as_str), Some("high"));
+    }
+
+    #[test]
+    fn turn_limit_and_effort_are_read_from_the_documented_locations() {
+        use serde_json::json;
+        let msg = json!({"query": {"text": "q", "effort": "normal"},
+                         "result": {"answer": "a", "turn_limit_reached": true}});
+        assert!(super::turn_limit_reached(&msg));
+        assert_eq!(super::turn_effort(&msg), Some("normal"));
+        // Older turns: no flag, no effort ⇒ false / None.
+        let old = json!({"query": {"text": "q"}, "result": {"answer": "a"}});
+        assert!(!super::turn_limit_reached(&old));
+        assert_eq!(super::turn_effort(&old), None);
+        assert!(!super::turn_limit_reached(
+            &json!({"result": {"turn_limit_reached": 1}})
+        ));
     }
 
     /// An explicitly-supplied key wins; a blank one does NOT become a blank
@@ -1461,6 +1537,7 @@ mod tests {
                 files_attach: None,
             },
             idempotency_key: None,
+            effort: None,
         };
         super::apply_scope(&mut form, &opts.scope);
         if let Some(p) = &opts.privacy {

@@ -29,6 +29,17 @@ Heuristics for agents:
   answer, a metadata extraction job), watch the activity/state endpoint with a
   bounded wait — do **not** tight-loop a `--detail full` read. The `ask` and
   `metadata extract --wait` paths already do bounded activity-polling for you.
+- **Pick the reply effort per message.** `--effort normal` (default) or
+  `--effort high` on `ripley ask` / `ripley chat` (MCP: `effort` on `ask`,
+  `chat-create`, `message-send`). `high` reasons more deeply with no per-reply
+  step limit, but is slower and uses more credits. Effort applies to one
+  message — pass it again on each follow-up that should use it.
+- **`turn_limit_reached: true` means "continue", not "failed".** A `normal`
+  reply that used up its per-reply step budget wraps up early and may be
+  incomplete; the chat is intact. Send an ordinary follow-up such as
+  `Continue` in the same chat (`fastio ripley chat --workspace WS_ID
+  --chat-id CHAT_ID "Continue"`, or MCP `message-send` with
+  `query_text="Continue"`) and the new reply picks up where it left off.
 
 `ripley` is the former `ai` group — **`ai` still works as a hidden alias** (CLI
 and MCP) for backward compatibility, but new code should use `ripley`.
@@ -339,6 +350,8 @@ Requires Deep Indexing enabled on the workspace for content-aware queries.
 
 ```bash
 fastio ripley ask --workspace WS_ID "your question"      # headline verb
+fastio ripley ask --workspace WS_ID --effort high "a harder question"
+fastio ripley chat --workspace WS_ID --chat-id CHAT_ID "Continue"   # follow-up
 fastio ripley list --workspace WS_ID --kind all          # chats
 fastio ripley details CHAT_ID --workspace WS_ID
 fastio ripley messages CHAT_ID --workspace WS_ID

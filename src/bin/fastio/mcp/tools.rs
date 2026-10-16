@@ -1784,6 +1784,14 @@ const TOOL_DEFS: &[ToolDef] = &[
                 false,
             ),
             (
+                "effort",
+                "Reply effort for this message (ask, chat-create, message-send): normal \
+                 (default) or high. high reasons more deeply with no per-reply step limit; \
+                 replies are slower and use more credits. Applies to ONE message — send it \
+                 again on each follow-up that should use it.",
+                false,
+            ),
+            (
                 "type",
                 "[deprecated/ignored] Chat type — dead on the migrated /ai/agent/ \
                  endpoint; accepted but not sent",
@@ -8629,6 +8637,50 @@ fn stamp_idempotency_key(
     Ok(key)
 }
 
+/// Validate the optional `effort` arg and stamp it on the form.
+///
+/// Checked here rather than left to the server so a typo gets an error naming
+/// the accepted values. Absent ⇒ omitted (the server default, `normal`).
+fn stamp_effort(
+    form: &mut std::collections::HashMap<String, String>,
+    args: &Map<String, Value>,
+) -> Result<(), CallToolResult> {
+    let effort = optional_str_strict(args, "effort")?;
+    if let Some(e) = effort
+        && !api::ai::EFFORT_VALUES.contains(&e)
+    {
+        return Err(error_text(&format!(
+            "invalid effort \"{e}\" — expected one of: {}",
+            api::ai::EFFORT_VALUES.join(", ")
+        )));
+    }
+    api::ai::insert_effort(form, effort);
+    Ok(())
+}
+
+/// The note attached when a reply stopped at its per-reply step limit
+/// (`result.turn_limit_reached`), telling the agent how to let it carry on.
+fn mcp_turn_limit_note(chat_id: &str) -> String {
+    format!(
+        "Ripley stopped this reply at its step limit, so the answer may be incomplete. The chat \
+         is intact: to let it pick up where it left off, send a follow-up such as \"Continue\" \
+         in this same chat (action=message-send, chat_id={chat_id}, query_text=\"Continue\"). \
+         effort=high has no per-reply step limit, but is slower and uses more credits."
+    )
+}
+
+/// Attach [`mcp_turn_limit_note`] when the details body reports the step limit.
+///
+/// Skipped on a failed turn: "the chat is intact, send Continue" is the wrong
+/// advice for a turn that ended without an answer (mirrors the CLI).
+fn attach_turn_limit_note(msg_data: &mut Value, chat_id: &str) {
+    let msg = api::ai::message_detail(msg_data);
+    if !api::ai::is_failed_state(&api::ai::turn_status(msg)) && api::ai::turn_limit_reached(msg) {
+        let note = mcp_turn_limit_note(chat_id);
+        attach_warning(msg_data, Some(&note));
+    }
+}
+
 /// [`ai_send_err_to_result`], plus the key to replay on a retryable 409.
 fn ai_send_err_with_key(
     err: &fastio_cli::error::CliError,
@@ -8712,6 +8764,9 @@ async fn handle_ai_chat_create(
         }
     }
     apply_ai_scope_from_args(&mut form, args);
+    if let Err(e) = stamp_effort(&mut form, args) {
+        return Ok(e);
+    }
     let idem = match stamp_idempotency_key(&mut form, args) {
         Ok(k) => k,
         Err(e) => return Ok(e),
@@ -8925,6 +8980,9 @@ async fn handle_ai_message_send(
     let mut form = std::collections::HashMap::new();
     form.insert("question".to_owned(), query.to_owned());
     apply_ai_scope_from_args(&mut form, args);
+    if let Err(e) = stamp_effort(&mut form, args) {
+        return Ok(e);
+    }
     let idem = match stamp_idempotency_key(&mut form, args) {
         Ok(k) => k,
         Err(e) => return Ok(e),
@@ -8999,7 +9057,10 @@ async fn handle_ai_message_details(
         urlencoding::encode(msg_id),
     );
     match api::ai::ai_api(&client, ctx_type, ctx_id, &sub, "GET", None, None).await {
-        Ok(v) => Ok(success_json(&v)),
+        Ok(mut v) => {
+            attach_turn_limit_note(&mut v, chat_id);
+            Ok(success_json(&v))
+        }
         Err(e) => Ok(cli_err_to_result(&e)),
     }
 }
@@ -9174,6 +9235,9 @@ async fn handle_ai_ask(
         }
     }
     apply_ai_scope_from_args(&mut form, args);
+    if let Err(e) = stamp_effort(&mut form, args) {
+        return Ok(e);
+    }
 
     let idem = match stamp_idempotency_key(&mut form, args) {
         Ok(k) => k,
@@ -9354,6 +9418,7 @@ async fn mcp_ask_wait(
                         let note = mcp_needs_input_note(&msg_data, chat_id);
                         attach_warning(&mut msg_data, Some(&note));
                     }
+                    attach_turn_limit_note(&mut msg_data, chat_id);
                     attach_warning(&mut msg_data, warning);
                     return success_json(&msg_data);
                 }
@@ -18073,6 +18138,54 @@ mod ripley_tool_tests {
             "boom".to_owned(),
             http_status,
         ))
+    }
+
+    #[test]
+    fn effort_is_validated_and_stamped() {
+        use super::stamp_effort;
+        let mut form = std::collections::HashMap::new();
+        let none = serde_json::Map::new();
+        assert!(stamp_effort(&mut form, &none).is_ok());
+        assert!(!form.contains_key("effort"), "absent ⇒ server default");
+        let mut high = serde_json::Map::new();
+        high.insert("effort".into(), serde_json::json!("high"));
+        assert!(stamp_effort(&mut form, &high).is_ok());
+        assert_eq!(form.get("effort").map(String::as_str), Some("high"));
+        for bad in [
+            serde_json::json!("HIGH"),
+            serde_json::json!("max"),
+            serde_json::json!(2),
+        ] {
+            let mut args = serde_json::Map::new();
+            args.insert("effort".into(), bad);
+            let mut f = std::collections::HashMap::new();
+            assert!(stamp_effort(&mut f, &args).is_err());
+            assert!(f.is_empty(), "a rejected effort is never sent");
+        }
+    }
+
+    #[test]
+    fn turn_limit_note_is_attached_only_when_reached() {
+        use super::attach_turn_limit_note;
+        let mut hit = serde_json::json!({"message": {"status": "complete",
+            "result": {"answer": "a", "turn_limit_reached": true}}});
+        attach_turn_limit_note(&mut hit, "C1");
+        let w = hit["warnings"][0].as_str().expect("a note");
+        assert!(
+            w.contains("chat_id=C1") && w.contains("\"Continue\""),
+            "got: {w}"
+        );
+        let mut miss = serde_json::json!({"message": {"status": "complete",
+            "result": {"answer": "a", "turn_limit_reached": false}}});
+        attach_turn_limit_note(&mut miss, "C1");
+        assert!(miss.get("warnings").is_none());
+        let mut failed = serde_json::json!({"message": {"status": "failed",
+            "result": {"turn_limit_reached": true}}});
+        attach_turn_limit_note(&mut failed, "C1");
+        assert!(
+            failed.get("warnings").is_none(),
+            "no Continue advice on a failed turn"
+        );
     }
 
     #[test]

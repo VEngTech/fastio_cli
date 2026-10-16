@@ -53,6 +53,8 @@ pub enum AiCommand {
         no_wait: bool,
         /// Replay guard — reuse a previous turn's key instead of billing a new turn.
         idempotency_key: Option<String>,
+        /// Reply effort (`normal` / `high`) for this turn.
+        effort: Option<String>,
     },
     /// Show full details (and history) for a chat.
     Details {
@@ -192,6 +194,8 @@ pub enum AiCommand {
         intelligence: Option<bool>,
         /// Replay guard — reuse a previous turn's key instead of billing a new turn.
         idempotency_key: Option<String>,
+        /// Reply effort (`normal` / `high`) for this turn.
+        effort: Option<String>,
     },
     /// Get chat message history.
     History {
@@ -236,6 +240,7 @@ pub async fn execute(command: &AiCommand, ctx: &CommandContext<'_>) -> Result<()
             kind,
             no_wait,
             idempotency_key,
+            effort,
         } => {
             ask(
                 ctx,
@@ -246,7 +251,10 @@ pub async fn execute(command: &AiCommand, ctx: &CommandContext<'_>) -> Result<()
                 personality.as_deref(),
                 kind.as_deref(),
                 *no_wait,
-                idempotency_key.as_deref(),
+                &TurnFlags {
+                    idempotency_key: idempotency_key.as_deref(),
+                    effort: effort.as_deref(),
+                },
             )
             .await
         }
@@ -356,6 +364,7 @@ pub async fn execute(command: &AiCommand, ctx: &CommandContext<'_>) -> Result<()
             folder_id,
             intelligence,
             idempotency_key,
+            effort,
         } => {
             chat(
                 ctx,
@@ -370,7 +379,10 @@ pub async fn execute(command: &AiCommand, ctx: &CommandContext<'_>) -> Result<()
                     folder_id: folder_id.as_deref(),
                     intelligence: *intelligence,
                 },
-                idempotency_key.as_deref(),
+                &TurnFlags {
+                    idempotency_key: idempotency_key.as_deref(),
+                    effort: effort.as_deref(),
+                },
             )
             .await
         }
@@ -573,7 +585,7 @@ async fn chat(
     message: &str,
     existing_chat_id: Option<&str>,
     flags: &ChatFlags<'_>,
-    idempotency_key: Option<&str>,
+    turn: &TurnFlags<'_>,
 ) -> Result<()> {
     anyhow::ensure!(
         !workspace.trim().is_empty(),
@@ -587,7 +599,9 @@ async fn chat(
     // Minted HERE, not inside the API layer, so a failure can quote it back. A
     // key the caller never sees cannot be re-sent, and re-sending it is the
     // entire point — see `api::ai::new_idempotency_key`.
-    let idempotency_key = idempotency_key.map_or_else(api::ai::new_idempotency_key, str::to_owned);
+    let idempotency_key = turn
+        .idempotency_key
+        .map_or_else(api::ai::new_idempotency_key, str::to_owned);
 
     // Step 1: Create chat or send message to existing chat
     let (chat_id, initial_response) = if let Some(cid) = existing_chat_id {
@@ -599,6 +613,7 @@ async fn chat(
             None,
             &scope,
             Some(&idempotency_key),
+            turn.effort,
         )
         .await
         {
@@ -617,6 +632,7 @@ async fn chat(
         options.personality = Some("detailed".to_owned());
         options.scope = scope;
         options.idempotency_key = Some(idempotency_key.clone());
+        options.effort = turn.effort.map(str::to_owned);
         let resp =
             match api::ai::create_chat(&client, workspace, message, "chat_with_files", &options)
                 .await
@@ -652,7 +668,8 @@ async fn chat(
 
     match wait_for_answer(&client, "workspace", workspace, &chat_id, &message_id).await {
         WaitOutcome::Complete(msg) => {
-            let result = render_answer(&chat_id, &message_id, &msg);
+            let continue_cmd = continue_command("workspace", workspace, &chat_id);
+            let result = render_answer(&chat_id, &message_id, &msg, continue_cmd.as_deref());
             ctx.output.render(&result)?;
             Ok(())
         }
@@ -674,7 +691,7 @@ async fn chat(
         // then exit NON-ZERO: the turn ended without an answer, and a shell
         // `ask && next` must not run `next`.
         WaitOutcome::TurnFailed(msg) => {
-            let result = render_answer(&chat_id, &message_id, &msg);
+            let result = render_answer(&chat_id, &message_id, &msg, None);
             ctx.output.render(&result)?;
             let state = result
                 .get("state")
@@ -830,7 +847,7 @@ async fn ask(
     personality: Option<&str>,
     kind: Option<&str>,
     no_wait: bool,
-    idempotency_key: Option<&str>,
+    turn: &TurnFlags<'_>,
 ) -> Result<()> {
     anyhow::ensure!(
         !profile_id.trim().is_empty(),
@@ -875,10 +892,13 @@ async fn ask(
     // Third turn-creating path (the context-aware one that serves both workspace
     // and share), and it needs the replay guard for the same reason as the other
     // two: without it a retry bills a second turn.
-    let idempotency_key = idempotency_key.map_or_else(api::ai::new_idempotency_key, str::to_owned);
+    let idempotency_key = turn
+        .idempotency_key
+        .map_or_else(api::ai::new_idempotency_key, str::to_owned);
     if !idempotency_key.is_empty() {
         form.insert("idempotency_key".to_owned(), idempotency_key.clone());
     }
+    api::ai::insert_effort(&mut form, turn.effort);
 
     let resp = match api::ai::ai_api_form(&client, profile_type, profile_id, "agent/", &form).await
     {
@@ -914,7 +934,8 @@ async fn ask(
     let final_msg = wait_for_answer(&client, profile_type, profile_id, &chat_id, &message_id).await;
     match final_msg {
         WaitOutcome::Complete(msg) => {
-            let result = render_answer(&chat_id, &message_id, &msg);
+            let continue_cmd = continue_command(profile_type, profile_id, &chat_id);
+            let result = render_answer(&chat_id, &message_id, &msg, continue_cmd.as_deref());
             ctx.output.render(&result)?;
             Ok(())
         }
@@ -935,7 +956,7 @@ async fn ask(
         // Render the structured body first so machine consumers still get it,
         // then exit NON-ZERO — see the workspace arm above.
         WaitOutcome::TurnFailed(msg) => {
-            let result = render_answer(&chat_id, &message_id, &msg);
+            let result = render_answer(&chat_id, &message_id, &msg, None);
             ctx.output.render(&result)?;
             let state = result
                 .get("state")
@@ -1204,8 +1225,35 @@ fn json_id_to_string(v: &Value) -> Option<String> {
     }
 }
 
+/// Per-turn send options shared by the `ask` and `chat` verbs.
+struct TurnFlags<'a> {
+    /// Replay guard — reuse a previous turn's key instead of billing a new turn.
+    idempotency_key: Option<&'a str>,
+    /// Reply effort (`normal` / `high`); `None` lets the server default apply.
+    effort: Option<&'a str>,
+}
+
+/// The CLI command that sends a `Continue` follow-up in this chat, when the
+/// CLI has one for the context.
+///
+/// Follow-ups are workspace-only in the CLI (`ripley chat --chat-id`), so a
+/// share chat gets `None` and the hint falls back to describing the action.
+fn continue_command(profile_type: &str, profile_id: &str, chat_id: &str) -> Option<String> {
+    (profile_type == "workspace").then(|| {
+        format!("fastio ripley chat --workspace {profile_id} --chat-id {chat_id} \"Continue\"")
+    })
+}
+
 /// Build the rendered answer payload from a completed message-details body.
-fn render_answer(chat_id: &str, message_id: &str, msg_data: &Value) -> Value {
+///
+/// `continue_cmd` is quoted in the hint when the reply stopped at its step
+/// limit (see [`api::ai::turn_limit_reached`]); see [`continue_command`].
+fn render_answer(
+    chat_id: &str,
+    message_id: &str,
+    msg_data: &Value,
+    continue_cmd: Option<&str>,
+) -> Value {
     // Unwrap the workspace `message` OR share `turn` detail wrapper documented
     // in the published API docs, so state/text/response are read from the right
     // object in both contexts.
@@ -1269,6 +1317,31 @@ fn render_answer(chat_id: &str, message_id: &str, msg_data: &Value) -> Value {
     // Emitted only when true, to keep the common shape unchanged.
     if api::ai::answer_was_truncated(msg) {
         result["truncated"] = serde_json::Value::Bool(true);
+    }
+    // The effort the turn ran with, echoed by the server on `query.effort`.
+    if let Some(effort) = api::ai::turn_effort(msg) {
+        result["effort"] = Value::String(effort.to_owned());
+    }
+    // A `normal` reply that used up its per-reply step budget wrapped up early.
+    // The chat is intact, so say how to let it carry on. Emitted only when
+    // true, like `truncated`.
+    if !failed && api::ai::turn_limit_reached(msg) {
+        result["turn_limit_reached"] = Value::Bool(true);
+        let how = continue_cmd.map_or_else(
+            || {
+                format!(
+                    "send a follow-up message such as \"Continue\" in this same chat \
+                     (chat_id={chat_id})"
+                )
+            },
+            |cmd| format!("run `{cmd}`"),
+        );
+        result["message"] = Value::String(format!(
+            "Ripley stopped this reply at its step limit, so the answer may be incomplete. \
+             The chat is intact — to let it pick up where it left off, {how}. \
+             `--effort high` has no per-reply step limit, but replies are slower and \
+             use more credits."
+        ));
     }
     // Citations live at `result.citations` on the message, per the published
     // API docs, and the probe order matters: a bare `citations` on the raw
@@ -1710,7 +1783,7 @@ mod phase2_tests {
             // The pre-2026-08-31 location the schema says does not exist.
             "citations": [{"nodeId": "legacy"}],
         });
-        let out = render_answer("c1", "m1", &data);
+        let out = render_answer("c1", "m1", &data, None);
         let rendered = serde_json::to_string(&out).unwrap_or_default();
         assert!(
             rendered.contains("documented"),
@@ -1731,7 +1804,7 @@ mod phase2_tests {
             "message": {"status": "complete", "result": {"answer": "the answer"}},
             "citations": [{"nodeId": "n1"}],
         });
-        let out = render_answer("C1", "M1", &msg);
+        let out = render_answer("C1", "M1", &msg, None);
         assert_eq!(out.get("state").and_then(|v| v.as_str()), Some("complete"));
         assert_eq!(
             out.get("response").and_then(|v| v.as_str()),
@@ -1781,7 +1854,7 @@ mod phase8_tests {
     fn a_failed_turn_is_not_rendered_as_an_empty_answer() {
         for status in ["failed", "cancelled", "lost", "errored"] {
             let msg = json!({"message": {"status": status}});
-            let out = render_answer("c1", "m1", &msg);
+            let out = render_answer("c1", "m1", &msg, None);
             assert_eq!(out.get("state").and_then(|v| v.as_str()), Some(status));
             assert_eq!(
                 out.get("response").and_then(|v| v.as_str()),
@@ -1811,7 +1884,7 @@ mod phase8_tests {
         let msg = json!({
             "message": {"status": "failed", "error": {"message": "model backend unavailable"}}
         });
-        let out = render_answer("c1", "m1", &msg);
+        let out = render_answer("c1", "m1", &msg, None);
         let message = out.get("message").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             message.contains("model backend unavailable"),
@@ -1824,7 +1897,7 @@ mod phase8_tests {
     #[test]
     fn a_completed_turn_carries_no_failure_message() {
         let msg = json!({"message": {"status": "complete", "result": {"answer": "hi"}}});
-        let out = render_answer("c1", "m1", &msg);
+        let out = render_answer("c1", "m1", &msg, None);
         assert_eq!(out.get("response").and_then(|v| v.as_str()), Some("hi"));
         assert!(
             out.get("message").is_none(),
@@ -1841,7 +1914,7 @@ mod phase8_tests {
             "message": {"status": "needs_input"},
             "clarification": {"type": "clarification", "question": "Which workspace?"},
         });
-        let out = render_answer("C1", "M1", &msg);
+        let out = render_answer("C1", "M1", &msg, None);
         assert_eq!(
             out.get("state").and_then(|v| v.as_str()),
             Some("needs_input")
@@ -1866,7 +1939,7 @@ mod phase8_tests {
         // A `needs_input` turn with no clarification object/question still yields
         // a guidance message (and no bogus `clarification` field).
         let msg = json!({"message": {"status": "needs_input"}});
-        let out = render_answer("C9", "M9", &msg);
+        let out = render_answer("C9", "M9", &msg, None);
         assert!(
             out.get("clarification").is_none(),
             "no question → no field: {out}"
@@ -1886,7 +1959,7 @@ mod phase8_tests {
         // A normal `complete` answer must NOT gain a needs_input clarification
         // message — that path is gated on the state.
         let msg = json!({"message": {"status": "complete", "result": {"answer": "the answer"}}});
-        let out = render_answer("C2", "M2", &msg);
+        let out = render_answer("C2", "M2", &msg, None);
         assert!(out.get("clarification").is_none());
         assert!(
             out.get("message").is_none(),
@@ -1904,7 +1977,7 @@ mod phase8_tests {
             "message": {"status": "needs_input", "text": "What were the Q3 figures?"},
             "clarification": {"question": "Which fiscal year?"},
         });
-        let out = render_answer("C3", "M3", &msg);
+        let out = render_answer("C3", "M3", &msg, None);
         assert_eq!(
             out.get("response").and_then(|v| v.as_str()),
             Some(""),
@@ -1926,7 +1999,7 @@ mod phase8_tests {
             "turn": {"status": "needs_input", "text": "echoed user question"},
             "clarification": {"type": "clarification", "question": "Which share folder?"},
         });
-        let out = render_answer("CS", "MS", &msg);
+        let out = render_answer("CS", "MS", &msg, None);
         assert_eq!(
             out.get("state").and_then(|v| v.as_str()),
             Some("needs_input"),
@@ -1952,7 +2025,7 @@ mod phase8_tests {
         let msg = json!({
             "turn": {"status": "complete", "result": {"answer": "the share answer"}},
         });
-        let out = render_answer("CS2", "MS2", &msg);
+        let out = render_answer("CS2", "MS2", &msg, None);
         assert_eq!(out.get("state").and_then(|v| v.as_str()), Some("complete"));
         assert_eq!(
             out.get("response").and_then(|v| v.as_str()),
@@ -2319,5 +2392,89 @@ mod legacy_flag_tests {
         )
         .expect_err("supplying both --folders-scope and --folder-id is a conflict");
         assert!(err.to_string().contains("conflicting flags"));
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::{continue_command, render_answer};
+    use serde_json::json;
+
+    fn completed(turn_limit: Option<bool>, effort: Option<&str>) -> serde_json::Value {
+        let mut result = json!({"answer": "partial answer", "truncated": false});
+        if let Some(t) = turn_limit {
+            result["turn_limit_reached"] = json!(t);
+        }
+        let mut message = json!({"status": "complete", "result": result});
+        if let Some(e) = effort {
+            message["query"] = json!({"text": "q", "effort": e});
+        }
+        json!({"message": message})
+    }
+
+    #[test]
+    fn turn_limit_reached_is_surfaced_with_the_continue_command() {
+        let cmd = continue_command("workspace", "123", "C1");
+        let out = render_answer(
+            "C1",
+            "M1",
+            &completed(Some(true), Some("normal")),
+            cmd.as_deref(),
+        );
+        assert_eq!(out["turn_limit_reached"], json!(true));
+        assert_eq!(out["effort"], json!("normal"));
+        assert_eq!(
+            out["response"],
+            json!("partial answer"),
+            "the partial answer is kept"
+        );
+        let msg = out["message"].as_str().expect("a hint");
+        assert!(
+            msg.contains("fastio ripley chat --workspace 123 --chat-id C1 \"Continue\""),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn share_turn_limit_hint_describes_the_follow_up_without_a_command() {
+        assert_eq!(continue_command("share", "S1", "C1"), None);
+        let out = render_answer("C1", "M1", &completed(Some(true), None), None);
+        let msg = out["message"].as_str().expect("a hint");
+        assert!(
+            msg.contains("\"Continue\"") && msg.contains("chat_id=C1"),
+            "got: {msg}"
+        );
+        assert!(!msg.contains("fastio ripley chat"), "got: {msg}");
+    }
+
+    #[test]
+    fn no_turn_limit_flag_keeps_the_common_shape() {
+        // Missing (older turns), false, and non-boolean all read as "not reached".
+        for data in [
+            completed(None, Some("high")),
+            completed(Some(false), Some("high")),
+            json!({"message": {"status": "complete",
+                    "result": {"answer": "a", "turn_limit_reached": "yes"}}}),
+        ] {
+            let out = render_answer("C", "M", &data, Some("cmd"));
+            assert!(out.get("turn_limit_reached").is_none(), "got: {out}");
+            assert!(out.get("message").is_none(), "got: {out}");
+        }
+        let out = render_answer("C", "M", &completed(None, Some("high")), None);
+        assert_eq!(out["effort"], json!("high"));
+    }
+
+    #[test]
+    fn a_failed_turn_never_claims_the_step_limit() {
+        let data = json!({"message": {"status": "failed",
+            "result": {"turn_limit_reached": true}}});
+        let out = render_answer("C", "M", &data, Some("cmd"));
+        assert!(out.get("turn_limit_reached").is_none(), "got: {out}");
+        assert!(
+            out["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("failed")),
+            "the failure message is kept: {out}"
+        );
     }
 }
