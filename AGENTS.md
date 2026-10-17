@@ -532,6 +532,59 @@ with `clear_password=true` on `update`) is rejected explicitly. Two actions are
 `.fastio/downloads/`, created 0700) and return a path + byte count. The
 `password` arg authorizes a protected link (x-ve-password; never echoed).
 
+## Service accounts
+
+A service account is a non-human member of ONE workspace that signs in only with
+API keys — for CI jobs, scripts, and agents that should not borrow a person's
+account.
+
+Roles: `viewer` (read, download, search, AI chat) or `editor` (viewer plus upload, edit, move, rename, trash, metadata, comments).
+
+**Managing them is CLI-only and needs a person's credential** — a workspace
+admin or owner, signed in as themselves. There is no MCP tool for it, and a
+service account key cannot manage service accounts or mint keys.
+
+```bash
+fastio service-account list --workspace WS_ID            # alias: fastio sa …
+fastio sa create --workspace WS_ID --name ci-bot --role editor [--key-expires 1w|30d|90d|1y|never] [--key-memo TEXT]
+fastio sa info SA_ID --workspace WS_ID                   # the account and its keys
+fastio sa update SA_ID --workspace WS_ID [--name NEW] [--role viewer|editor]
+fastio sa disable SA_ID --workspace WS_ID                # every key stops at once; reversible
+fastio sa enable SA_ID --workspace WS_ID
+fastio sa delete SA_ID --workspace WS_ID --yes           # deletes its keys and closes it
+fastio sa key list SA_ID --workspace WS_ID
+fastio sa key create SA_ID --workspace WS_ID [--expires 1w|30d|90d|1y|never] [--memo TEXT]
+fastio sa key revoke SA_ID KEY_ID --workspace WS_ID --yes
+```
+
+- `create` (which also issues the first key) and `key create` print the key's
+  **secret once**; it can never be retrieved again. Both refuse `--quiet` and
+  `--fields`, which would discard it. Key expiry defaults to 90 days.
+- If a create fails with a network or 5xx error, do NOT just re-run it: the
+  account or key may already exist. Check with `list` / `key list`, revoke any
+  key whose secret you do not hold, and create a new one.
+- A role change applies to every existing key of the account. `disable` is the
+  reversible stop; `delete` and `key revoke` are permanent.
+- An account's activity: `fastio event list --workspace WS_ID --calling-user-id SA_ID`.
+
+**Running the CLI as a service account** — use the secret like any API key:
+
+```bash
+export FASTIO_API_KEY=fio_sa_...      # or --token, or a profile
+fastio auth status                    # shows account_type: service_account, its name, workspace, role
+```
+
+- The key is always limited to its one workspace (`workspace:<id>:r` for a
+  viewer, `:rw` for an editor) and cannot be widened with `auth api-key update`.
+- It works over plain REST only (no realtime/websocket tokens); poll for changes.
+  The built-in `fastio mcp` server works with it for everything its role
+  allows.
+- Management and sharing operations (members, invitations, creating shares, File Shares, sign, imports, org changes, permanently purging files or emptying the trash, key/account management) return HTTP `403` with reason `service_account_not_permitted`. Identity reads (`auth status`, `auth check`, `workspace list`) work, and public share links behave as if the request were anonymous.
+  Repeating a refused call with the same key never helps — it needs a person's
+  credential.
+- **Never paste a service account secret into an MCP tool argument** or any
+  other transcript; set it in the environment of the process that needs it.
+
 ## Billing
 
 Org billing lives under `fastio org billing`:

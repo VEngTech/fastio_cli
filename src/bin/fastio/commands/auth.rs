@@ -1090,6 +1090,9 @@ async fn status(ctx: &CommandContext<'_>) -> Result<()> {
     let creds_file = CredentialsFile::load(ctx.config_dir).context("failed to load credentials")?;
     let stored = creds_file.get(ctx.profile_name);
 
+    // The client whose bearer passed `check_token`, kept for the best-effort
+    // service account lookup below. `None` whenever the check did not succeed.
+    let mut checked_client: Option<ApiClient> = None;
     let value = if let Some(t) = &resolved {
         // Try to validate the token
         let client =
@@ -1097,6 +1100,7 @@ async fn status(ctx: &CommandContext<'_>) -> Result<()> {
 
         match api::auth::check_token(&client).await {
             Ok(check) => {
+                checked_client = Some(client);
                 json!({
                     "authenticated": true,
                     "user_id": check.id,
@@ -1135,22 +1139,114 @@ async fn status(ctx: &CommandContext<'_>) -> Result<()> {
     };
 
     let mut value = value;
-    apply_stored_scopes(
-        &mut value,
-        stored_scopes_describe_bearer(
-            bearer_from_store(
-                ctx.flag_token,
-                std::env::var("FASTIO_TOKEN").ok().as_deref(),
-                std::env::var("FASTIO_API_KEY").ok().as_deref(),
-            ),
-            resolved.as_deref(),
-            stored,
+    let bearer_from_profile = stored_scopes_describe_bearer(
+        bearer_from_store(
+            ctx.flag_token,
+            std::env::var("FASTIO_TOKEN").ok().as_deref(),
+            std::env::var("FASTIO_API_KEY").ok().as_deref(),
         ),
+        resolved.as_deref(),
         stored,
     );
+    apply_stored_scopes(&mut value, bearer_from_profile, stored);
+
+    // Best-effort: identify a service account key. Runs only after a
+    // successful check, AFTER the stored scopes (so the live scopes win for a
+    // service account), and is bounded so a slow lookup cannot hold up the
+    // status of an ordinary login. Every failure is ignored.
+    if let Some(client) = &checked_client
+        && principal_lookup_needed(bearer_from_profile, stored)
+        && let Ok(Ok(scopes)) =
+            tokio::time::timeout(PRINCIPAL_LOOKUP_TIMEOUT, api::auth::scopes(client)).await
+    {
+        apply_service_account_principal(&mut value, &scopes, bearer_from_profile);
+    }
 
     ctx.output.render(&value)?;
     Ok(())
+}
+
+/// Whether `auth status` should ask the server if the bearer is a service
+/// account.
+///
+/// Not when the bearer came from the stored profile AND that profile signed in
+/// through the browser (`auth_method: "pkce"`): a browser session is always a
+/// person, so the extra round trip could never change the output. A `--token`
+/// / env bearer, or a stored API key, may be a service account key and is
+/// looked up.
+fn principal_lookup_needed(bearer_from_profile: bool, stored: Option<&StoredCredentials>) -> bool {
+    // A stored API key takes precedence over the profile's token when the
+    // bearer is resolved, so only a profile WITHOUT one is a browser session.
+    let browser_session = bearer_from_profile
+        && stored.is_some_and(|s| {
+            s.auth_method.as_deref() == Some("pkce") && s.expose_api_key().is_none()
+        });
+    !browser_session
+}
+
+/// Upper bound on the optional `GET /auth/scopes/` lookup in `auth status`.
+const PRINCIPAL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Describe a service account credential in an `auth status` payload.
+///
+/// Acts ONLY when the payload is an authenticated status and the
+/// `GET /auth/scopes/` response names a `principal` of type
+/// `"service_account"`. A person's credential (`type: "user"`), a response
+/// without `principal`, or an unauthenticated payload leave `value` untouched,
+/// byte for byte.
+///
+/// For a service account it adds `account_type`, `service_account_name`,
+/// `service_account_id`, `workspace_id`, `org_id`, and `role`, and sets
+/// `scopes` to the LIVE grant as one comma-separated string (a string, like the
+/// stored grant, so table and CSV still render the whole record rather than
+/// the scope list alone). When the bearer did not come from the profile,
+/// the profile's own `email` / `auth_method` / `expires_at` / `expired`
+/// describe a different credential and are removed.
+fn apply_service_account_principal(value: &mut Value, scopes: &Value, bearer_from_profile: bool) {
+    let Some(principal) = scopes.get("principal") else {
+        return;
+    };
+    if principal.get("type").and_then(Value::as_str) != Some("service_account") {
+        return;
+    }
+    if value.get("authenticated") != Some(&Value::Bool(true)) {
+        return;
+    }
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+
+    if !bearer_from_profile {
+        for field in ["email", "auth_method", "expires_at", "expired"] {
+            map.shift_remove(field);
+        }
+    }
+    map.insert("account_type".to_owned(), json!("service_account"));
+    for (from, to) in [
+        ("name", "service_account_name"),
+        ("id", "service_account_id"),
+        ("workspace_id", "workspace_id"),
+        ("org_id", "org_id"),
+        ("role", "role"),
+    ] {
+        if let Some(v) = principal.get(from).filter(|v| !v.is_null()) {
+            map.insert(to.to_owned(), v.clone());
+        }
+    }
+    let live_scopes = match scopes.get("scopes") {
+        Some(Value::Array(items)) => Some(
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    if let Some(live_scopes) = live_scopes {
+        map.insert("scopes".to_owned(), json!(live_scopes));
+    }
 }
 
 /// Attach the stored profile's granted scopes to an `auth status` payload —
@@ -1889,8 +1985,9 @@ mod admin_scope_tests {
     use super::{
         ApiKeyCommand, ApiKeyScopeSpec, AuthCommand, CommandContext, HINT_KEY_SCOPES_CHANGED,
         HINT_SESSION_SCOPES_CHANGED, Handback, LoginAccess, OauthCommand, PASSWORD_LOGIN_MOVED,
-        admin_grant_warning, api_key_create_value, apply_stored_scopes, checked_login_url, execute,
-        login_pkce, pkce, pkce_credentials, read_only_signout_warning, scopes_rows_for_table,
+        admin_grant_warning, api_key_create_value, apply_service_account_principal,
+        apply_stored_scopes, checked_login_url, execute, login_pkce, pkce, pkce_credentials,
+        principal_lookup_needed, read_only_signout_warning, scopes_rows_for_table,
         signout_with_env,
     };
     use fastio_cli::api::types::ApiKeyCreateResponse;
@@ -2793,6 +2890,141 @@ mod admin_scope_tests {
         let mut value = json!({"authenticated": false});
         apply_stored_scopes(&mut value, true, None);
         assert!(value.get("scopes").is_none(), "{value}");
+    }
+
+    // ─── `auth status` service account principal ──────────────────────────
+
+    /// The successful-check payload `status` builds, after the stored scopes
+    /// were applied for a profile bearer.
+    fn human_status_payload() -> Value {
+        json!({
+            "authenticated": true,
+            "user_id": "1234567890123456789",
+            "email": "person@example.com",
+            "auth_method": "pkce",
+            "expires_at": 1_900_000_000,
+            "expired": false,
+            "profile": "default",
+            "scopes": r#"["user:*:rw"]"#,
+        })
+    }
+
+    fn sa_scopes_response() -> Value {
+        json!({
+            "scopes": ["workspace:1000000000000000001:rw"],
+            "principal": {
+                "type": "service_account",
+                "id": "5555555555555555555",
+                "name": "ci-bot",
+                "workspace_id": "1000000000000000001",
+                "org_id": "2000000000000000002",
+                "role": "editor"
+            }
+        })
+    }
+
+    /// A person's credential, a `principal.type` of `user`, a response with no
+    /// principal, an unauthenticated payload, or an unexpected type: the
+    /// payload is unchanged byte for byte — including the stored `scopes`
+    /// STRING and every key's order.
+    #[test]
+    fn status_principal_merge_leaves_non_service_accounts_untouched() {
+        let before = human_status_payload();
+        let before_text = before.to_string();
+        let responses = [
+            json!({"scopes": ["user:*:rw"], "principal": {"type": "user"}}),
+            json!({"scopes": ["user:*:rw"]}),
+            json!({"principal": {"type": "agent", "name": "x"}}),
+            json!({"principal": null}),
+            json!([]),
+        ];
+        for response in &responses {
+            for from_profile in [true, false] {
+                let mut value = before.clone();
+                apply_service_account_principal(&mut value, response, from_profile);
+                assert_eq!(value.to_string(), before_text, "{response}");
+            }
+        }
+
+        // A service account principal never annotates an UNAUTHENTICATED payload.
+        let unauthenticated = json!({"authenticated": false, "reason": "token_invalid"});
+        let mut value = unauthenticated.clone();
+        apply_service_account_principal(&mut value, &sa_scopes_response(), false);
+        assert_eq!(value, unauthenticated);
+    }
+
+    /// An env / flag bearer identified as a service account: identity fields
+    /// added, the live scope as a STRING, and the profile's unrelated email /
+    /// auth method / expiry removed.
+    #[test]
+    fn status_principal_merge_describes_a_service_account_bearer() {
+        let mut value = json!({
+            "authenticated": true,
+            "user_id": "5555555555555555555",
+            "email": "person@example.com",
+            "auth_method": "pkce",
+            "expires_at": 1_900_000_000,
+            "expired": false,
+            "profile": "default",
+        });
+        apply_service_account_principal(&mut value, &sa_scopes_response(), false);
+        assert_eq!(value["account_type"], "service_account");
+        assert_eq!(value["service_account_name"], "ci-bot");
+        assert_eq!(value["service_account_id"], "5555555555555555555");
+        assert_eq!(value["workspace_id"], "1000000000000000001");
+        assert_eq!(value["org_id"], "2000000000000000002");
+        assert_eq!(value["role"], "editor");
+        assert_eq!(value["scopes"], "workspace:1000000000000000001:rw");
+        for gone in ["email", "auth_method", "expires_at", "expired"] {
+            assert!(value.get(gone).is_none(), "{gone} must be removed: {value}");
+        }
+        assert_eq!(value["profile"], "default");
+        assert_eq!(value["user_id"], "5555555555555555555");
+    }
+
+    /// A profile that stores the service account key keeps its own metadata,
+    /// and the live scope replaces the cached grant string.
+    #[test]
+    fn status_principal_merge_keeps_profile_metadata_for_a_profile_bearer() {
+        let mut value = human_status_payload();
+        apply_service_account_principal(&mut value, &sa_scopes_response(), true);
+        assert_eq!(value["email"], "person@example.com");
+        assert_eq!(value["auth_method"], "pkce");
+        assert_eq!(value["scopes"], "workspace:1000000000000000001:rw");
+        assert!(value["scopes"].is_string(), "scopes stays a string");
+        assert_eq!(value["account_type"], "service_account");
+    }
+
+    /// The lookup is skipped ONLY for a browser (PKCE) session that the
+    /// profile itself supplied; flag / env bearers and stored API keys are
+    /// still looked up.
+    #[test]
+    fn status_principal_lookup_skips_only_profile_browser_sessions() {
+        let pkce = StoredCredentials {
+            auth_method: Some("pkce".to_owned()),
+            ..StoredCredentials::default()
+        };
+        let api_key = StoredCredentials {
+            auth_method: Some("api_key".to_owned()),
+            ..StoredCredentials::default()
+        };
+        // A browser profile that also stores an API key resolves to the key.
+        let pkce_with_key = StoredCredentials {
+            auth_method: Some("pkce".to_owned()),
+            api_key: Some(secrecy::SecretString::from("fio_sa_example")),
+            ..StoredCredentials::default()
+        };
+        let unknown = StoredCredentials::default();
+
+        assert!(!principal_lookup_needed(true, Some(&pkce)));
+        assert!(principal_lookup_needed(true, Some(&pkce_with_key)));
+        // A flag / env bearer beside a browser profile may be a service account key.
+        assert!(principal_lookup_needed(false, Some(&pkce)));
+        assert!(principal_lookup_needed(true, Some(&api_key)));
+        assert!(principal_lookup_needed(false, Some(&api_key)));
+        assert!(principal_lookup_needed(true, Some(&unknown)));
+        assert!(principal_lookup_needed(false, None));
+        assert!(principal_lookup_needed(true, None));
     }
 
     /// A credentials directory holding the two profiles the fallback test

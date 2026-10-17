@@ -19,7 +19,7 @@
 //! - **Confirmation gates.** `delete`, `grants remove`, and `upload` (a
 //!   destructive new-version write) require `--yes` or an interactive y/N
 //!   confirmation; a non-interactive caller without `--yes` is blocked
-//!   deterministically (mirrors `sign.rs`'s `confirm_destructive`).
+//!   deterministically (the shared [`super::confirm::confirm_destructive`]).
 //! - **Error mapping.** All File-Share-specific wording lives HERE in
 //!   [`map_fileshare_error`] (never in the global `error.rs` hints, which stay
 //!   resource-agnostic). A `1609`/`404` is surfaced UNIFORMLY ("unavailable")
@@ -32,7 +32,6 @@
 //!   stdout and written 0600 to `--token-file`, reusing the shared
 //!   [`super::secret_output`] helpers.
 
-use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -45,6 +44,7 @@ use fastio_cli::error::CliError;
 use crate::cli::{FileshareCommands, FileshareGrantsCommands};
 
 use super::CommandContext;
+use super::confirm::confirm_destructive;
 use super::secret_output::{extract_secret, redact_secret_field, write_secret_file};
 
 /// Environment variable consulted for the link password when `--password` is
@@ -129,37 +129,6 @@ fn resolve_consumption_password(flag: Option<&str>) -> Result<Option<SecretStrin
         anyhow::bail!("link password cannot be empty — omit --password for an unprotected share");
     }
     Ok(resolved)
-}
-
-// ─── Confirmation ───────────────────────────────────────────────────────────
-
-/// Gate a destructive / outward-facing action behind explicit confirmation.
-///
-/// `--yes` proceeds unconditionally. Without it, an interactive TTY is prompted
-/// y/N; a non-interactive caller that omitted `--yes` is blocked
-/// deterministically (so an unattended script never silently deletes, revokes,
-/// or writes a new version). Mirrors `sign.rs`'s `confirm_destructive`.
-fn confirm_destructive(action: &str, detail: &str, yes: bool) -> Result<()> {
-    if yes {
-        return Ok(());
-    }
-    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
-    if !interactive {
-        anyhow::bail!("'{action}' {detail}. Re-run with --yes to proceed.");
-    }
-    eprint!("'{action}' {detail}. Proceed? [y/N] ");
-    let _ = io::stderr().flush();
-    let mut answer = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut answer)
-        .context("failed to read confirmation from stdin")?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if answer == "y" || answer == "yes" {
-        Ok(())
-    } else {
-        anyhow::bail!("aborted: '{action}' not confirmed");
-    }
 }
 
 /// Reject an empty File Share id client-side.

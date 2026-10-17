@@ -25,7 +25,6 @@
 //!   `9992` is the director's path walk ending unmatched; `1685` is "insufficient signing
 //!   credits"; a `void` on a terminal envelope (`1660`) is surfaced clearly.
 
-use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -42,6 +41,7 @@ use crate::cli::{
 };
 
 use super::CommandContext;
+use super::confirm::confirm_destructive;
 
 // ─── @file JSON resolution ──────────────────────────────────────────────────
 
@@ -251,37 +251,6 @@ fn bool_field(v: &Value, key: &str) -> Result<Option<bool>> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(*b)),
         Some(_) => anyhow::bail!("field '{key}' must be a JSON boolean"),
-    }
-}
-
-// ─── Destructive-action confirmation ─────────────────────────────────────────
-
-/// Gate a destructive / outward-facing action behind explicit confirmation.
-///
-/// `--yes` proceeds unconditionally. Without it, an interactive TTY is prompted
-/// y/N; a non-interactive caller that omitted `--yes` is blocked
-/// deterministically (so an unattended script never silently sends or voids).
-/// Mirrors the metadata `confirm_spend` shape.
-fn confirm_destructive(action: &str, detail: &str, yes: bool) -> Result<()> {
-    if yes {
-        return Ok(());
-    }
-    let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
-    if !interactive {
-        anyhow::bail!("'{action}' {detail}. Re-run with --yes to proceed.");
-    }
-    eprint!("'{action}' {detail}. Proceed? [y/N] ");
-    let _ = io::stderr().flush();
-    let mut answer = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut answer)
-        .context("failed to read confirmation from stdin")?;
-    let answer = answer.trim().to_ascii_lowercase();
-    if answer == "y" || answer == "yes" {
-        Ok(())
-    } else {
-        anyhow::bail!("aborted: '{action}' not confirmed");
     }
 }
 

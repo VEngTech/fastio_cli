@@ -41,6 +41,8 @@ pub mod org;
 pub mod preview;
 /// Unified (grouped-bucket) search endpoints across a workspace or share.
 pub mod search;
+/// Workspace service account (non-human member + API keys) endpoints.
+pub mod service_account;
 /// Share link management endpoints.
 pub mod share;
 /// E-signature (SignEnvelope) endpoints (workspace-parented).
