@@ -134,6 +134,11 @@ pub enum Commands {
     /// Workspace member management.
     #[command(subcommand)]
     Member(MemberCommands),
+    /// Workspace service accounts: non-human members of one workspace that
+    /// authenticate only with API keys (for CI jobs, scripts, and agents).
+    /// Managed by workspace admins and owners with their own credential.
+    #[command(subcommand, visible_alias = "sa")]
+    ServiceAccount(ServiceAccountCommands),
     /// Invitations.
     #[command(subcommand)]
     Invitation(InvitationCommands),
@@ -2796,6 +2801,154 @@ pub enum MemberCommands {
         /// Workspace ID.
         #[arg(long)]
         workspace: String,
+    },
+}
+
+// ─── Service accounts ────────────────────────────────────────────────────────
+
+/// Service account subcommands.
+///
+/// Run these with a workspace admin's or owner's own credential — a service
+/// account key cannot manage service accounts or mint keys.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum ServiceAccountCommands {
+    /// List the workspace's service accounts and its service account limit.
+    List {
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Create a service account together with its first API key.
+    ///
+    /// The key's secret is printed ONCE and can never be retrieved again, so
+    /// `--quiet` and `--fields` are refused on this command.
+    Create {
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+        /// Display name (1-64 characters, unique within the workspace).
+        #[arg(long)]
+        name: String,
+        /// Role: `viewer` (read, download, search, AI chat) or `editor`
+        /// (viewer plus upload, edit, move, rename, trash, metadata,
+        /// comments). Required.
+        #[arg(long, value_parser = ["viewer", "editor"])]
+        role: String,
+        /// Lifetime of the first key. The server default (90 days) applies when
+        /// omitted.
+        #[arg(long, value_parser = ["1w", "30d", "90d", "1y", "never"])]
+        key_expires: Option<String>,
+        /// Memo for the first key (up to 100 characters).
+        #[arg(long)]
+        key_memo: Option<String>,
+    },
+    /// Show a service account and its keys (key secrets are never shown).
+    Info {
+        /// Service account ID.
+        service_account_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Rename a service account and/or change its role. A role change applies
+    /// to every existing key of the account.
+    #[command(group(
+        clap::ArgGroup::new("changes")
+            .required(true)
+            .multiple(true)
+            .args(["name", "role"])
+    ))]
+    Update {
+        /// Service account ID.
+        service_account_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+        /// New display name.
+        #[arg(long)]
+        name: Option<String>,
+        /// New role: `viewer` or `editor`.
+        #[arg(long, value_parser = ["viewer", "editor"])]
+        role: Option<String>,
+    },
+    /// Disable a service account: all of its keys stop working at once.
+    /// Reversible with `enable`.
+    Disable {
+        /// Service account ID.
+        service_account_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Re-enable a disabled service account.
+    Enable {
+        /// Service account ID.
+        service_account_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Delete a service account: its keys are deleted and the account is
+    /// closed. Files and events it produced remain. Use `disable` for a
+    /// reversible stop.
+    Delete {
+        /// Service account ID.
+        service_account_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Manage a service account's API keys.
+    #[command(subcommand)]
+    Key(ServiceAccountKeyCommands),
+}
+
+/// Service account key subcommands.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum ServiceAccountKeyCommands {
+    /// List a service account's keys (secrets are never shown).
+    List {
+        /// Service account ID.
+        service_account_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Create a new key for a service account.
+    ///
+    /// The secret is printed ONCE and can never be retrieved again, so
+    /// `--quiet` and `--fields` are refused on this command.
+    Create {
+        /// Service account ID.
+        service_account_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+        /// Key lifetime. The server default (90 days) applies when omitted.
+        #[arg(long, value_parser = ["1w", "30d", "90d", "1y", "never"])]
+        expires: Option<String>,
+        /// Memo (up to 100 characters).
+        #[arg(long)]
+        memo: Option<String>,
+    },
+    /// Revoke a key immediately. Its secret stops working at once; a
+    /// replacement key comes with a new secret.
+    Revoke {
+        /// Service account ID.
+        service_account_id: String,
+        /// Key ID (from `key list`; not the secret).
+        key_id: String,
+        /// Workspace ID.
+        #[arg(long)]
+        workspace: String,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -10022,5 +10175,183 @@ mod deep_indexing_flag_tests {
                 "{path:?} help must not mention the old name: {help}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod service_account_parse_tests {
+    use super::{Cli, Commands, ServiceAccountCommands, ServiceAccountKeyCommands};
+    use clap::{CommandFactory, Parser};
+
+    const WS: &str = "1000000000000000001";
+
+    fn parse(args: &[&str]) -> ServiceAccountCommands {
+        let cli = Cli::try_parse_from(args).unwrap_or_else(|e| panic!("parse failed: {e}"));
+        match cli.command {
+            Commands::ServiceAccount(c) => c,
+            other => panic!("expected ServiceAccount, got {other:?}"),
+        }
+    }
+
+    /// `sa` is a VISIBLE alias: accepted, and listed in `--help`.
+    #[test]
+    fn sa_is_a_visible_alias() {
+        let long = parse(&["fastio", "service-account", "list", "--workspace", WS]);
+        let short = parse(&["fastio", "sa", "list", "--workspace", WS]);
+        assert!(matches!(long, ServiceAccountCommands::List { ref workspace } if workspace == WS));
+        assert!(matches!(short, ServiceAccountCommands::List { ref workspace } if workspace == WS));
+
+        let root = Cli::command();
+        let sub = root
+            .find_subcommand("service-account")
+            .expect("service-account subcommand");
+        assert!(
+            sub.get_visible_aliases().any(|a| a == "sa"),
+            "`sa` must be visible, not hidden"
+        );
+    }
+
+    #[test]
+    fn create_requires_role_and_accepts_only_the_presets() {
+        let base = [
+            "fastio",
+            "sa",
+            "create",
+            "--workspace",
+            WS,
+            "--name",
+            "ci-bot",
+        ];
+        assert!(
+            Cli::try_parse_from(base).is_err(),
+            "--role is required (no server default)"
+        );
+
+        match parse(&[&base[..], &["--role", "viewer", "--key-expires", "30d"]].concat()) {
+            ServiceAccountCommands::Create {
+                role,
+                key_expires,
+                key_memo,
+                name,
+                ..
+            } => {
+                assert_eq!(role, "viewer");
+                assert_eq!(key_expires.as_deref(), Some("30d"));
+                assert_eq!(key_memo, None);
+                assert_eq!(name, "ci-bot");
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+
+        for expires in ["1w", "30d", "90d", "1y", "never"] {
+            parse(&[&base[..], &["--role", "editor", "--key-expires", expires]].concat());
+        }
+        for bad in [
+            ["--role", "admin", "--key-expires", "30d"],
+            ["--role", "editor", "--key-expires", "2w"],
+            ["--role", "editor", "--key-expires", "90"],
+        ] {
+            assert!(
+                Cli::try_parse_from([&base[..], &bad[..]].concat()).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn update_needs_name_or_role() {
+        let base = ["fastio", "sa", "update", "123", "--workspace", WS];
+        assert!(
+            Cli::try_parse_from(base).is_err(),
+            "update with neither --name nor --role must be a usage error"
+        );
+        match parse(&[&base[..], &["--name", "renamed"]].concat()) {
+            ServiceAccountCommands::Update { name, role, .. } => {
+                assert_eq!(name.as_deref(), Some("renamed"));
+                assert_eq!(role, None);
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+        match parse(&[&base[..], &["--role", "editor", "--name", "n"]].concat()) {
+            ServiceAccountCommands::Update { name, role, .. } => {
+                assert_eq!(name.as_deref(), Some("n"));
+                assert_eq!(role.as_deref(), Some("editor"));
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from([&base[..], &["--role", "owner"]].concat()).is_err());
+    }
+
+    #[test]
+    fn every_subcommand_requires_workspace() {
+        for args in [
+            vec!["fastio", "sa", "list"],
+            vec!["fastio", "sa", "info", "1"],
+            vec!["fastio", "sa", "disable", "1"],
+            vec!["fastio", "sa", "enable", "1"],
+            vec!["fastio", "sa", "delete", "1"],
+            vec!["fastio", "sa", "key", "list", "1"],
+            vec!["fastio", "sa", "key", "create", "1"],
+            vec!["fastio", "sa", "key", "revoke", "1", "k1"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn destructive_commands_take_yes_and_key_create_takes_presets() {
+        match parse(&["fastio", "sa", "delete", "1", "--workspace", WS, "--yes"]) {
+            ServiceAccountCommands::Delete { yes, .. } => assert!(yes),
+            other => panic!("expected Delete, got {other:?}"),
+        }
+        match parse(&["fastio", "sa", "delete", "1", "--workspace", WS]) {
+            ServiceAccountCommands::Delete { yes, .. } => assert!(!yes),
+            other => panic!("expected Delete, got {other:?}"),
+        }
+        match parse(&[
+            "fastio",
+            "sa",
+            "key",
+            "revoke",
+            "1",
+            "k1",
+            "--workspace",
+            WS,
+        ]) {
+            ServiceAccountCommands::Key(ServiceAccountKeyCommands::Revoke {
+                service_account_id,
+                key_id,
+                yes,
+                ..
+            }) => {
+                assert_eq!(service_account_id, "1");
+                assert_eq!(key_id, "k1");
+                assert!(!yes);
+            }
+            other => panic!("expected key revoke, got {other:?}"),
+        }
+        match parse(&["fastio", "sa", "key", "create", "1", "--workspace", WS]) {
+            ServiceAccountCommands::Key(ServiceAccountKeyCommands::Create {
+                expires,
+                memo,
+                ..
+            }) => {
+                assert_eq!(expires, None, "an omitted --expires is not sent");
+                assert_eq!(memo, None);
+            }
+            other => panic!("expected key create, got {other:?}"),
+        }
+        let bad_expiry = [
+            "fastio",
+            "sa",
+            "key",
+            "create",
+            "1",
+            "--workspace",
+            WS,
+            "--expires",
+            "forever",
+        ];
+        assert!(Cli::try_parse_from(bad_expiry).is_err());
     }
 }

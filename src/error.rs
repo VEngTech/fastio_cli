@@ -351,22 +351,100 @@ pub const HINT_DESTINATION_NESTED: &str = "That folder is already part of an imp
 /// Code `destination_immutable`: the destination is create-time only.
 pub const HINT_DESTINATION_IMMUTABLE: &str = "A source's destination is fixed when the source is created.      Move the imported folder in storage instead of changing the source.";
 
+/// Service accounts — `400` / `name_invalid`.
+pub const HINT_SA_NAME_INVALID: &str = "A service account name must be 1-64 characters with no control characters. \
+     Fix `--name` and retry.";
+
+/// Service accounts — `400` / `role_invalid`.
+pub const HINT_SA_ROLE_INVALID: &str = "A service account role must be `viewer` or `editor`.";
+
+/// Service accounts — `400` / `expires_invalid`.
+pub const HINT_SA_EXPIRES_INVALID: &str =
+    "Key expiry must be one of the presets: 1w, 30d, 90d, 1y, never.";
+
+/// Service accounts — `400` / `memo_invalid`.
+pub const HINT_SA_MEMO_INVALID: &str = "A key memo must be at most 100 characters with no control characters. \
+     Fix `--memo` (or `--key-memo` on create) and retry.";
+
+/// Service accounts — `403` / `service_account_not_permitted`: a service
+/// account key called something outside what service accounts may do.
+///
+/// Repeating the call with the same key never helps; the request needs a
+/// person's credential.
+pub const HINT_SA_NOT_PERMITTED: &str = "This request was made with a service account key, and service accounts are not allowed to do this. \
+     Run it with a workspace member's own credential instead (`fastio auth login`, or a personal API key). \
+     Managing service accounts needs a workspace admin or owner.";
+
+/// Service accounts — `404` / `service_account_not_found`.
+pub const HINT_SA_NOT_FOUND: &str = "No such service account in this workspace — it may have been deleted. \
+     List them with `fastio service-account list --workspace <id>`.";
+
+/// Service accounts — `404` / `key_not_found`.
+pub const HINT_SA_KEY_NOT_FOUND: &str = "No such key on this service account — it may already be revoked. \
+     List its keys with `fastio service-account key list <service-account-id> --workspace <id>`.";
+
+/// Service accounts — `409` / `name_taken`.
+pub const HINT_SA_NAME_TAKEN: &str = "Another service account in this workspace already uses that name (names are not case-sensitive). \
+     Choose a different `--name`.";
+
+/// Service accounts — `409` / `service_account_limit`. The cap itself is
+/// printed on the `param max:` line of the error, so the hint points there
+/// rather than interpolating it (hints are `&'static str`).
+pub const HINT_SA_LIMIT: &str = "This workspace has reached its service account limit (the cap is on the `param max:` line above). \
+     Delete a service account you no longer need, or upgrade the plan.";
+
+/// Service accounts — `409` / `key_limit`. The cap is on the `param max:`
+/// line of the error.
+pub const HINT_SA_KEY_LIMIT: &str = "This service account already has the maximum number of active keys (the cap is on the `param max:` line above). \
+     Revoke one with `fastio service-account key revoke` before creating another.";
+
+/// Service accounts — `409` / `service_account_disabled`: a key cannot be
+/// created for a disabled account.
+pub const HINT_SA_DISABLED: &str = "This service account is disabled, so it cannot be given new keys. \
+     Re-enable it with `fastio service-account enable <service-account-id> --workspace <id>` first.";
+
+/// Service accounts — `409` / `workspace_unavailable`: the workspace was
+/// closed while the create was in flight.
+pub const HINT_SA_WORKSPACE_UNAVAILABLE: &str = "The workspace was closed or is closing, so no service account was created. \
+     Check it with `fastio workspace info <id>`.";
+
 /// Map a server `reason` to its recovery hint.
 ///
 /// The single place that knows the reason vocabulary. Unknown reasons return
 /// `None` so the caller falls through to the code/status hints rather than
 /// inventing guidance for a condition this build does not know about.
+///
+/// The service account reasons are matched on the HTTP status AS WELL as the
+/// reason: several of them (`name_invalid`, `name_taken`, `key_not_found`)
+/// are generic enough that another endpoint could emit the same string with a
+/// different status and a different recovery, so only the documented
+/// status/reason pair gets service account advice.
+///
+/// The disabled-account `401` is deliberately absent: it carries no documented
+/// `reason`, so it keeps the generic `401` handling.
 #[must_use]
-fn reason_hint(reason: &str) -> Option<&'static str> {
-    match reason {
-        "drive_required" => Some(HINT_DRIVE_REQUIRED),
-        "drive_unknown" => Some(HINT_DRIVE_UNKNOWN),
-        "drive_not_supported" => Some(HINT_DRIVE_NOT_SUPPORTED),
-        "drive_immutable" => Some(HINT_DRIVE_IMMUTABLE),
-        "drive_lookup_failed" => Some(HINT_DRIVE_LOOKUP_FAILED),
-        "destination_unknown" => Some(HINT_DESTINATION_UNKNOWN),
-        "destination_nested" => Some(HINT_DESTINATION_NESTED),
-        "destination_immutable" => Some(HINT_DESTINATION_IMMUTABLE),
+fn reason_hint(reason: &str, http_status: u16) -> Option<&'static str> {
+    match (reason, http_status) {
+        ("drive_required", _) => Some(HINT_DRIVE_REQUIRED),
+        ("drive_unknown", _) => Some(HINT_DRIVE_UNKNOWN),
+        ("drive_not_supported", _) => Some(HINT_DRIVE_NOT_SUPPORTED),
+        ("drive_immutable", _) => Some(HINT_DRIVE_IMMUTABLE),
+        ("drive_lookup_failed", _) => Some(HINT_DRIVE_LOOKUP_FAILED),
+        ("destination_unknown", _) => Some(HINT_DESTINATION_UNKNOWN),
+        ("destination_nested", _) => Some(HINT_DESTINATION_NESTED),
+        ("destination_immutable", _) => Some(HINT_DESTINATION_IMMUTABLE),
+        ("name_invalid", 400) => Some(HINT_SA_NAME_INVALID),
+        ("role_invalid", 400) => Some(HINT_SA_ROLE_INVALID),
+        ("expires_invalid", 400) => Some(HINT_SA_EXPIRES_INVALID),
+        ("memo_invalid", 400) => Some(HINT_SA_MEMO_INVALID),
+        ("service_account_not_permitted", 403) => Some(HINT_SA_NOT_PERMITTED),
+        ("service_account_not_found", 404) => Some(HINT_SA_NOT_FOUND),
+        ("key_not_found", 404) => Some(HINT_SA_KEY_NOT_FOUND),
+        ("name_taken", 409) => Some(HINT_SA_NAME_TAKEN),
+        ("service_account_limit", 409) => Some(HINT_SA_LIMIT),
+        ("key_limit", 409) => Some(HINT_SA_KEY_LIMIT),
+        ("service_account_disabled", 409) => Some(HINT_SA_DISABLED),
+        ("workspace_unavailable", 409) => Some(HINT_SA_WORKSPACE_UNAVAILABLE),
         _ => None,
     }
 }
@@ -1265,7 +1343,10 @@ impl ApiError {
         {
             return Some(hint);
         }
-        if let Some(hint) = self.field_reason().and_then(reason_hint) {
+        if let Some(hint) = self
+            .field_reason()
+            .and_then(|reason| reason_hint(reason, self.http_status))
+        {
             return Some(hint);
         }
         // Check specific error codes before falling back to HTTP status.
@@ -2420,6 +2501,93 @@ mod tests {
             "params": [{ "name": "x", "reason": "some_future_reason" }]
         }));
         assert_eq!(e.suggestion(), Some(HINT_INVALID_INPUT));
+    }
+
+    /// An object-shaped `params` carrying a service account `reason`, as the
+    /// service account endpoints emit it (`{reason, max?}`). The numeric code is
+    /// deliberately an arbitrary value: these hints key on status + reason only.
+    fn sa_err(http_status: u16, reason: &str) -> ApiError {
+        api_err(123_456, http_status).with_details(json!({
+            "params": { "reason": reason, "max": 5 }
+        }))
+    }
+
+    /// Every documented status/reason pair reaches its own hint through
+    /// `suggestion()` (the real entry point), ahead of the code and status
+    /// fallbacks.
+    #[test]
+    fn service_account_reasons_map_to_their_hints() {
+        let cases = [
+            (400, "name_invalid", HINT_SA_NAME_INVALID),
+            (400, "role_invalid", HINT_SA_ROLE_INVALID),
+            (400, "expires_invalid", HINT_SA_EXPIRES_INVALID),
+            (400, "memo_invalid", HINT_SA_MEMO_INVALID),
+            (403, "service_account_not_permitted", HINT_SA_NOT_PERMITTED),
+            (404, "service_account_not_found", HINT_SA_NOT_FOUND),
+            (404, "key_not_found", HINT_SA_KEY_NOT_FOUND),
+            (409, "name_taken", HINT_SA_NAME_TAKEN),
+            (409, "service_account_limit", HINT_SA_LIMIT),
+            (409, "key_limit", HINT_SA_KEY_LIMIT),
+            (409, "service_account_disabled", HINT_SA_DISABLED),
+            (409, "workspace_unavailable", HINT_SA_WORKSPACE_UNAVAILABLE),
+        ];
+        for (status, reason, hint) in cases {
+            assert_eq!(
+                sa_err(status, reason).suggestion(),
+                Some(hint),
+                "{status} {reason}"
+            );
+        }
+    }
+
+    /// The pairing is load-bearing: the same reason string under a status it is
+    /// not documented with gets the ordinary status handling, not service
+    /// account advice.
+    #[test]
+    fn service_account_reasons_require_their_documented_status() {
+        for (status, reason) in [
+            (409, "name_invalid"),
+            (400, "name_taken"),
+            (403, "key_not_found"),
+            (404, "service_account_not_permitted"),
+            (400, "key_limit"),
+        ] {
+            let hint = sa_err(status, reason).suggestion();
+            for sa_hint in [
+                HINT_SA_NAME_INVALID,
+                HINT_SA_NAME_TAKEN,
+                HINT_SA_KEY_NOT_FOUND,
+                HINT_SA_NOT_PERMITTED,
+                HINT_SA_KEY_LIMIT,
+            ] {
+                assert_ne!(hint, Some(sa_hint), "{status} {reason}");
+            }
+        }
+    }
+
+    /// An unknown reason on a service account status falls through to the
+    /// generic status hint, and the limit hints point at the `param max:` line
+    /// that `Display` really prints.
+    #[test]
+    fn service_account_unknown_reason_and_limit_rendering() {
+        let unknown = sa_err(409, "some_future_reason");
+        assert!(
+            !matches!(
+                unknown.suggestion(),
+                Some(h) if h.contains("service account")
+            ),
+            "{:?}",
+            unknown.suggestion()
+        );
+
+        let limit = sa_err(409, "service_account_limit");
+        assert!(limit.to_string().contains("param max: 5"), "{limit}");
+        assert!(HINT_SA_LIMIT.contains("param max:"));
+        assert!(HINT_SA_KEY_LIMIT.contains("param max:"));
+
+        // The disabled-account 401 has no documented reason: unmapped on purpose.
+        let disabled_401 = api_err(10_560, 401);
+        assert_ne!(disabled_401.suggestion(), Some(HINT_SA_DISABLED));
     }
 
     #[test]

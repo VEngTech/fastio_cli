@@ -11,25 +11,45 @@ use serde_json::Value;
 
 /// Render a JSON value as a table to stdout.
 pub fn render(value: &Value, no_color: bool) -> Result<(), io::Error> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", to_text(value, no_color, None))
+}
+
+/// The text [`render`] writes, without its trailing newline.
+///
+/// `width` pins the layout width of the dynamic arrangement (cells wrap to
+/// fit it); `None` leaves it to the terminal, exactly as [`render`] does.
+#[must_use]
+pub fn to_text(value: &Value, no_color: bool, width: Option<u16>) -> String {
     let mut table = Table::new();
     table.set_content_arrangement(ContentArrangement::Dynamic);
 
     if no_color {
         table.force_no_tty();
     }
+    if let Some(width) = width {
+        table.set_width(width);
+    }
 
     match value {
         Value::Array(items) => render_array(&mut table, items),
         Value::Object(_) => render_array(&mut table, std::slice::from_ref(value)),
-        other => {
-            // Scalar values: just print them directly.
-            let mut stdout = io::stdout().lock();
-            return writeln!(stdout, "{}", format_scalar(other));
-        }
+        // Scalar values: just print them directly.
+        other => return format_scalar(other),
     }
 
-    let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{table}")
+    table.to_string()
+}
+
+/// One `label: value` line, outside any table, so a long token is never
+/// wrapped across lines. `value` is sanitized like every table cell.
+#[must_use]
+pub fn labelled_line(label: &str, value: &str) -> String {
+    format!(
+        "{}: {}",
+        super::strip_terminal_hostile(label),
+        super::strip_terminal_hostile(value)
+    )
 }
 
 /// Render an array of objects as table rows.

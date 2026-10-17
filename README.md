@@ -118,6 +118,27 @@ fastio org list
 
 Scopes are `entity_type:entity_id:access_mode` strings, where the access mode is `r`, `rw`, or `rwa` (admin). `--org` / `--workspace` / `--share` (repeatable) and `--all` select the entities, `--admin` / `--read-only` set the access mode, and `--account-settings` adds `userdetails:*:rw` for password, email, and 2FA-enrolment changes — `rwa` alone does not grant those. An `api-key update` **replaces** the key's entire scope set, so run `fastio auth api-key get <key-id>` first and re-state every scope it should keep. If those scopes do not all use the same access mode, re-state them with the raw `--scopes '[...]'` form: `--admin` and `--read-only` apply to every entity in the request, so neither can express a mixed set. A blanket `--admin` escalates a read-only scope to admin along with the one you meant to raise; a blanket `--read-only` downgrades a writable or admin scope along with the one you meant to narrow. `fastio auth oauth narrow <session-id>` gives up authority on a login session and takes effect at its next token refresh.
 
+### Service Account Keys
+
+For automation that should not act as a person, a workspace admin or owner can create a **service account** — a non-human member of one workspace with a `viewer` or `editor` role — and give the job its key:
+
+```bash
+# As the admin: create the account and its first key (the secret is printed once)
+fastio service-account create --workspace 1234567890123456789 --name ci-bot --role editor
+
+# In the job: use the secret like any API key
+export FASTIO_API_KEY=fio_sa_...
+fastio auth status
+```
+
+A service account key is limited to its one workspace.
+
+Roles: `viewer` (read, download, search, AI chat) or `editor` (viewer plus upload, edit, move, rename, trash, metadata, comments).
+
+Management and sharing operations (members, invitations, creating shares, File Shares, sign, imports, org changes, permanently purging files or emptying the trash, key/account management) return HTTP `403` with reason `service_account_not_permitted`. Identity reads (`auth status`, `auth check`, `workspace list`) work, and public share links behave as if the request were anonymous.
+
+The secret cannot be retrieved again; if it is lost, `fastio sa key create` a new one and `fastio sa key revoke` the old one.
+
 ### Two-Factor Authentication
 
 ```bash
@@ -196,6 +217,7 @@ Pipelines that need machine-parseable output can opt back in with
 | `org` | Org CRUD, billing, members, transfer tokens, discovery, assets |
 | `workspace` | Workspace CRUD, search, limits, `jobs-status` (poll async jobs) |
 | `member` | Workspace/share member management |
+| `service-account` | Workspace service accounts — non-human members that use API keys (alias `sa`): list, create, info, update, disable, enable, delete, and `key list/create/revoke`. Admin/owner only; secrets are shown once |
 | `invitation` | List, accept, decline, delete invitations; `join` accepts or declines one by its email key |
 | `dashboard` | Per-workspace dashboard card feed: get, dismiss, undismiss |
 
@@ -255,7 +277,7 @@ The CLI includes a built-in [Model Context Protocol](https://modelcontextprotoco
 fastio mcp
 ```
 
-This exposes the CLI's action-routed tool surface as MCP tools over stdio, compatible with Claude Desktop, VS Code, and other MCP-compatible clients. A few high-risk or local-byte operations (sign send/void, fileshare upload write-back and ws-token) remain CLI-only.
+This exposes the CLI's action-routed tool surface as MCP tools over stdio, compatible with Claude Desktop, VS Code, and other MCP-compatible clients. A few high-risk or local-byte operations (sign send/void, fileshare upload write-back and ws-token, and service account management, which mints secrets) remain CLI-only.
 
 Tool responses are rendered as GitHub-flavored Markdown by default,
 byte-equivalent to the Fastio API's `?output=markdown` output.

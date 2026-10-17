@@ -187,7 +187,7 @@ pub async fn upload_entity_asset(
             error_code: None,
             message: msg.to_owned(),
             http_status: status.as_u16(),
-            details: None,
+            details: body.get("error").and_then(ApiClient::extract_error_details),
         }));
     }
 
@@ -210,7 +210,7 @@ pub async fn upload_entity_asset(
             error_code: None,
             message: msg.to_owned(),
             http_status: status.as_u16(),
-            details: None,
+            details: body.get("error").and_then(ApiClient::extract_error_details),
         }))
     }
 }
@@ -415,7 +415,11 @@ pub async fn read_user_asset(
             error_code: None,
             message: format!("asset read failed with HTTP {status}: {body}"),
             http_status: status,
-            details: None,
+            // A refused read answers with the JSON error envelope; keep its
+            // enrichment so the reason-keyed hints can fire.
+            details: serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(ApiClient::extract_error_details)),
         }));
     }
 
@@ -491,5 +495,139 @@ mod tests {
         let form = super::close_account_form("jane.doe@example.com", true);
         assert_eq!(form.get("dryrun").map(String::as_str), Some("true"));
         assert!(form.contains_key("email_address"));
+    }
+
+    /// The SA-refusal body: `error.params.reason` is `service_account_not_permitted`.
+    const SA_DENIED: &[u8] = br#"{"result":"no","error":{"code":1680,"text":"Service accounts are not permitted to perform this action.","params":{"reason":"service_account_not_permitted"}}}"#;
+
+    /// Serve ONE response with `status_line` and `body` after draining the full
+    /// request (headers plus `Content-Length` body), so a multipart upload is
+    /// not reset mid-write. Returns the bound `127.0.0.1:<port>`.
+    async fn spawn_one_shot(status_line: &'static str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr").to_string();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut req: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut want: Option<usize> = None;
+                loop {
+                    if want.is_some_and(|w| req.len() >= w) {
+                        break;
+                    }
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            req.extend_from_slice(&chunk[..n]);
+                            if want.is_none()
+                                && let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n")
+                            {
+                                let head =
+                                    String::from_utf8_lossy(&req[..pos]).to_ascii_lowercase();
+                                let cl = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        l.strip_prefix("content-length:")
+                                            .and_then(|v| v.trim().parse::<usize>().ok())
+                                    })
+                                    .unwrap_or(0);
+                                want = Some(pos + 4 + cl);
+                            }
+                        }
+                    }
+                }
+                let header = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+                let _ = sock.flush().await;
+            }
+        });
+        addr
+    }
+
+    fn client_for(addr: &str) -> crate::client::ApiClient {
+        crate::client::ApiClient::new(&format!("http://{addr}"), Some("tok".to_owned()))
+            .expect("client builds")
+    }
+
+    fn assert_sa_hint(err: &crate::error::CliError) {
+        match err {
+            crate::error::CliError::Api(api) => {
+                assert_eq!(api.http_status, 403);
+                assert_eq!(api.field_reason(), Some("service_account_not_permitted"));
+            }
+            other => panic!("expected CliError::Api, got {other:?}"),
+        }
+        assert_eq!(err.suggestion(), Some(crate::error::HINT_SA_NOT_PERMITTED));
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("fastio-user-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[tokio::test]
+    async fn upload_entity_asset_keeps_sa_refusal_params() {
+        let addr = spawn_one_shot("403 Forbidden", SA_DENIED).await;
+        let dir = scratch("up403");
+        let file = dir.join("logo.png");
+        std::fs::write(&file, b"png").expect("write scratch file");
+        let err = super::upload_entity_asset(
+            &client_for(&addr),
+            "workspace",
+            "1234567890123456789",
+            "logo",
+            file.to_str().expect("utf-8 path"),
+        )
+        .await
+        .expect_err("a 403 must surface as an error");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_sa_hint(&err);
+    }
+
+    /// The 2xx-with-`result: no` branch keeps the same details.
+    #[tokio::test]
+    async fn upload_entity_asset_keeps_params_on_2xx_result_no() {
+        let addr = spawn_one_shot("200 OK", SA_DENIED).await;
+        let dir = scratch("up200");
+        let file = dir.join("logo.png");
+        std::fs::write(&file, b"png").expect("write scratch file");
+        let err = super::upload_entity_asset(
+            &client_for(&addr),
+            "workspace",
+            "1234567890123456789",
+            "logo",
+            file.to_str().expect("utf-8 path"),
+        )
+        .await
+        .expect_err("result: no must surface as an error");
+        let _ = std::fs::remove_dir_all(&dir);
+        match err {
+            crate::error::CliError::Api(api) => {
+                assert_eq!(api.http_status, 200);
+                assert_eq!(api.field_reason(), Some("service_account_not_permitted"));
+            }
+            other => panic!("expected CliError::Api, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_user_asset_keeps_sa_refusal_params() {
+        let addr = spawn_one_shot("403 Forbidden", SA_DENIED).await;
+        let dir = scratch("read403");
+        let out = dir.join("asset.bin");
+        let err = super::read_user_asset(&client_for(&addr), "1234567890123456789", "photo", &out)
+            .await
+            .expect_err("a 403 must surface as an error");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_sa_hint(&err);
     }
 }

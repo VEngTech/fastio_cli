@@ -408,6 +408,7 @@ async fn dispatch(
             commands::workspace::execute(&map_workspace_command(c), ctx).await
         }
         Commands::Member(c) => commands::member::execute(&map_member_command(c), ctx).await,
+        Commands::ServiceAccount(c) => commands::service_account::execute(c, ctx).await,
         Commands::Invitation(c) => {
             commands::invitation::execute(&map_invitation_command(c), ctx).await
         }

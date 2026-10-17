@@ -1215,6 +1215,45 @@ impl ApiClient {
         self.handle_response(resp).await
     }
 
+    /// [`Self::post_once`] that also NEVER follows a redirect — exactly one
+    /// request on the wire, full stop.
+    ///
+    /// For mints whose response carries a one-time secret. The default client
+    /// re-sends a POST body on a 307/308, which would mint a second time while
+    /// the first response (and its secret) is discarded. This rides the
+    /// no-redirect [`Self::no_redirect_envelope_client`] instead, and a 3xx is a
+    /// [`CliError::Parse`] naming neither the URL nor any form value: whether
+    /// the server acted before redirecting is unknown, so the caller must treat
+    /// it like a lost response.
+    pub async fn post_once_no_redirect<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: &HashMap<String, String>,
+    ) -> Result<T, CliError> {
+        tracing::trace!(
+            method = "POST",
+            path = %redact_path_for_log(path),
+            form = ?redact_form_for_log(form),
+            "api request (single-attempt, no redirect)"
+        );
+        let url = self.url(path);
+        let resp = self
+            .send_request_once(|| {
+                let mut req = self.no_redirect_envelope_client.post(&url).form(form);
+                if let Some(auth) = self.auth_header() {
+                    req = req.header(AUTHORIZATION, auth);
+                }
+                req
+            })
+            .await?;
+        if resp.status().is_redirection() {
+            return Err(CliError::Parse(
+                "the server answered with an unexpected redirect; it was not followed".to_owned(),
+            ));
+        }
+        self.handle_response(resp).await
+    }
+
     /// Perform a form-encoded POST without authentication, returning the raw
     /// JSON response without Fast.io envelope unwrapping.
     ///
@@ -3146,12 +3185,18 @@ impl ApiClient {
             } else {
                 Self::truncate_for_error_message(&body)
             };
+            // A raw-content endpoint still answers a refusal with the JSON error
+            // envelope; keep its enrichment (e.g. `params.reason`) so the
+            // reason-keyed hints can fire.
+            let details = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Self::extract_error_details));
             return Err(CliError::Api(ApiError {
                 code: 0,
                 error_code: None,
                 message,
                 http_status,
-                details: None,
+                details,
             }));
         }
 
@@ -3283,7 +3328,7 @@ impl ApiClient {
     /// Returns `None` if the envelope carried none of these, so callers can
     /// cheaply branch on "is there extra detail to render". Boxed to match
     /// [`ApiError::details`], which boxes to keep `CliError` small.
-    fn extract_error_details(err: &Value) -> Option<Box<Value>> {
+    pub(crate) fn extract_error_details(err: &Value) -> Option<Box<Value>> {
         // Allow-list: anything not named here is DROPPED. A consumer that reads
         // a field off `details` is therefore only reachable if the field is in
         // this list — adding the read without adding the key yields a branch
@@ -6425,5 +6470,28 @@ mod tests {
             !debug.contains(&addr),
             "the request host:port leaked into Debug: {debug}"
         );
+    }
+
+    /// The raw-text path (`get_raw_text`, used for a node's `/read/`) must keep
+    /// the JSON error envelope's `params.reason` so the service-account hint
+    /// fires, exactly as the JSON path does.
+    #[tokio::test]
+    async fn get_raw_text_keeps_sa_refusal_params() {
+        let body: &'static [u8] = br#"{"result":"no","error":{"code":1680,"text":"Service accounts are not permitted to perform this action.","params":{"reason":"service_account_not_permitted"}}}"#;
+        let addr = spawn_one_shot_server("403 Forbidden", "application/json", body).await;
+        let client = ApiClient::new(&format!("http://{addr}"), Some("tok".to_owned()))
+            .expect("client builds");
+        let err = client
+            .get_raw_text("/workspace/1/storage/n/read/", None)
+            .await
+            .expect_err("a 403 must surface as an error");
+        match &err {
+            CliError::Api(api) => {
+                assert_eq!(api.http_status, 403);
+                assert_eq!(api.field_reason(), Some("service_account_not_permitted"));
+            }
+            other => panic!("expected CliError::Api, got {other:?}"),
+        }
+        assert_eq!(err.suggestion(), Some(crate::error::HINT_SA_NOT_PERMITTED));
     }
 }

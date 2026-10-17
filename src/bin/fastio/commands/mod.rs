@@ -386,6 +386,8 @@ pub mod auth;
 pub mod comment;
 /// CLI configuration commands (profiles, defaults).
 pub mod configure;
+/// Shared confirmation gate for destructive commands (`--yes` / y/N prompt).
+pub mod confirm;
 /// Per-workspace dashboard (actionable card feed) commands.
 pub mod dashboard;
 /// File and folder download commands.
@@ -420,6 +422,8 @@ pub mod preview;
 pub mod search;
 /// Shared one-time-secret output helpers (extract / write 0600 / redact).
 pub mod secret_output;
+/// Workspace service account commands (`fastio service-account`, alias `sa`).
+pub mod service_account;
 /// Share link management commands.
 pub mod share;
 /// E-signature (SignEnvelope) commands.

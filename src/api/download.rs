@@ -115,7 +115,11 @@ where
             error_code: None,
             message: format!("Download failed with HTTP {status}: {body}"),
             http_status: status,
-            details: None,
+            // The `/read/` endpoint answers a refusal with the JSON error
+            // envelope; keep its enrichment so the reason-keyed hints can fire.
+            details: serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(ApiClient::extract_error_details)),
         }));
     }
 
@@ -479,4 +483,48 @@ mod tests {
         assert_eq!(sanitize_filename("/a/b/c.txt"), "c.txt");
         assert_eq!(sanitize_filename("..."), "download");
     }
+
+    /// A refused `/read/` returns the JSON error envelope; its `params.reason`
+    /// must survive into the error so the service-account hint fires.
+    #[tokio::test]
+    async fn download_file_keeps_sa_refusal_params() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let body: &'static [u8] = SA_BODY;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let header = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(body).await;
+                let _ = sock.flush().await;
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("fastio-dl-sa-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let out = dir.join("x.bin");
+        let url = format!("http://{addr}/read/");
+        let err = super::download_file(&url, &out, None, |_, _| {})
+            .await
+            .expect_err("a 403 must surface as an error");
+        let _ = std::fs::remove_dir_all(&dir);
+        match &err {
+            crate::error::CliError::Api(api) => {
+                assert_eq!(api.http_status, 403);
+                assert_eq!(api.field_reason(), Some("service_account_not_permitted"));
+            }
+            other => panic!("expected CliError::Api, got {other:?}"),
+        }
+        assert_eq!(err.suggestion(), Some(crate::error::HINT_SA_NOT_PERMITTED));
+    }
+
+    const SA_BODY: &[u8] = br#"{"result":"no","error":{"code":1680,"text":"Service accounts are not permitted to perform this action.","params":{"reason":"service_account_not_permitted"}}}"#;
 }

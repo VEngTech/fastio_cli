@@ -61,7 +61,7 @@ fn parse_writeback_error(body: &Value, http_status: u16, fallback_message: &str)
         error_code: None,
         message,
         http_status,
-        details: None,
+        details: err.and_then(ApiClient::extract_error_details),
     })
 }
 
@@ -221,7 +221,7 @@ pub async fn single_call_upload(
                     error_code: None,
                     message: message.to_owned(),
                     http_status: status.as_u16(),
-                    details: None,
+                    details: body.get("error").and_then(ApiClient::extract_error_details),
                 }));
             }
             Err(err) => {
@@ -1363,7 +1363,7 @@ async fn handle_stream_response(resp: reqwest::Response, attempt: &mut u32) -> S
         error_code: None,
         message: message.to_owned(),
         http_status: status.as_u16(),
-        details: None,
+        details: body.get("error").and_then(ApiClient::extract_error_details),
     }))
 }
 
@@ -1683,7 +1683,7 @@ fn parse_batch_response(body: &Value, http_status: u16) -> Result<BatchUploadRes
             error_code: None,
             message: message.to_owned(),
             http_status,
-            details: None,
+            details: body.get("error").and_then(ApiClient::extract_error_details),
         }));
     }
 
@@ -2497,6 +2497,20 @@ mod tests {
         status_line: &'static str,
         location: Option<&'static str>,
     ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        spawn_counting_server_with_body(
+            status_line,
+            location,
+            br#"{"result":false,"error":{"code":500,"text":"boom"}}"#,
+        )
+        .await
+    }
+
+    /// [`spawn_counting_server`] with a caller-chosen JSON response body.
+    async fn spawn_counting_server_with_body(
+        status_line: &'static str,
+        location: Option<&'static str>,
+        body: &'static [u8],
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -2556,7 +2570,6 @@ mod tests {
                         }
                     }
                 }
-                let body = br#"{"result":false,"error":{"code":500,"text":"boom"}}"#;
                 let header = match location {
                     Some(loc) => format!(
                         "HTTP/1.1 {status_line}\r\nLocation: {loc}\r\n\
@@ -2654,5 +2667,74 @@ mod tests {
             1,
             "a redirect must be served exactly once and not chased/replayed"
         );
+    }
+
+    /// The SA-refusal body the server sends on a denied upload: a 403 whose
+    /// `error.params.reason` is `service_account_not_permitted`.
+    const SA_DENIED_403: &[u8] = br#"{"result":"no","error":{"code":1680,"text":"Service accounts are not permitted to perform this action.","params":{"reason":"service_account_not_permitted"}}}"#;
+
+    fn assert_sa_hint(err: &CliError) {
+        match err {
+            CliError::Api(api) => {
+                assert_eq!(api.http_status, 403);
+                assert_eq!(api.code, 1680);
+                assert_eq!(api.field_reason(), Some("service_account_not_permitted"));
+            }
+            other => panic!("expected CliError::Api, got {other:?}"),
+        }
+        assert_eq!(
+            err.suggestion(),
+            Some(crate::error::HINT_SA_NOT_PERMITTED),
+            "the server's error params must survive so the SA hint fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_call_upload_keeps_sa_refusal_params() {
+        let (addr, _count) =
+            spawn_counting_server_with_body("403 Forbidden", None, SA_DENIED_403).await;
+        let err = single_call_upload(
+            "tok",
+            &format!("http://{addr}"),
+            "1234567890123456789",
+            "workspace",
+            "root",
+            "a.txt",
+            b"hello".to_vec(),
+        )
+        .await
+        .expect_err("a 403 must surface as an error");
+        assert_sa_hint(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_upload_keeps_sa_refusal_params() {
+        let (addr, _count) =
+            spawn_counting_server_with_body("403 Forbidden", None, SA_DENIED_403).await;
+        let err = stream_upload(
+            "tok",
+            &format!("http://{addr}"),
+            "up1",
+            Bytes::from_static(b"hello"),
+            None,
+            None,
+        )
+        .await
+        .expect_err("a 403 must surface as an error");
+        assert_sa_hint(&err);
+    }
+
+    #[test]
+    fn parse_writeback_error_keeps_sa_refusal_params() {
+        let body: Value = serde_json::from_slice(SA_DENIED_403).expect("valid json");
+        let err = parse_writeback_error(&body, 403, "fallback");
+        assert_sa_hint(&err);
+    }
+
+    #[test]
+    fn parse_batch_response_keeps_sa_refusal_params() {
+        let body: Value = serde_json::from_slice(SA_DENIED_403).expect("valid json");
+        let err = parse_batch_response(&body, 403).expect_err("result:no is an error");
+        assert_sa_hint(&err);
     }
 }
