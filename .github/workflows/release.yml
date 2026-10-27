@@ -145,6 +145,12 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
+          # One binary per build target; never checksum a partial set.
+          set -- fastio-*
+          if [ "$#" -ne 5 ]; then
+            echo "::error::expected 5 binaries, found $#: $*"
+            exit 1
+          fi
           sha256sum fastio-* > SHA256SUMS
           cat SHA256SUMS
           ls -la
