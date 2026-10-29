@@ -57,6 +57,12 @@ const EXIT_FAILURE: i32 = 1;
 /// Retrying after re-reading the current revision is the appropriate response.
 const EXIT_CONFLICT: i32 = 3;
 
+/// A suggested edit could not be accepted with the note closed
+/// (`suggestion_needs_editor`). Usually a person has to finish the accept in
+/// the editor; the hint covers the other cases (the note is busy, or an
+/// earlier attempt's outcome is unknown and the note must be re-read first).
+const EXIT_NEEDS_EDITOR: i32 = 5;
+
 // Exit code 4 is intentionally UNASSIGNED. It briefly denoted "contested" —
 // stop retrying, this node is under contention — read from a server-declared
 // flag. That signal was cut 2026-08-24: the field would have shipped as a
@@ -135,10 +141,19 @@ fn exit_code_for(cli_err: &fastio_cli::error::CliError) -> i32 {
     // currently emit `error.error_code`, so it cannot fire today. Kept because
     // it costs nothing and would catch the token if that ever changes — but it
     // is NOT the working path, and must not be mistaken for one.
+    // A suggestion that can only be accepted in the editor is its own exit
+    // code: the caller must hand it to a person, not retry. Keyed on the
+    // server's reason, never on the shared 409 status.
+    if api_err.field_reason() == Some(NEEDS_EDITOR_REASON) {
+        return EXIT_NEEDS_EDITOR;
+    }
     let marker_matches = |m: &str| m.eq_ignore_ascii_case(VERSION_MISMATCH_MARKER);
     let by_error_code = api_err.error_code.as_deref().is_some_and(marker_matches);
     let by_reason = api_err.field_reason().is_some_and(marker_matches);
-    if by_error_code || by_reason {
+    // A thread's `--if-state-version` precondition failing is the same kind
+    // of compare-and-swap miss: re-read the thread, then decide again.
+    let by_state_version = api_err.field_reason() == Some(STATE_VERSION_CONFLICT_REASON);
+    if by_error_code || by_reason || by_state_version {
         EXIT_CONFLICT
     } else {
         EXIT_FAILURE
@@ -147,6 +162,13 @@ fn exit_code_for(cli_err: &fastio_cli::error::CliError) -> i32 {
 
 /// Machine-readable marker the API uses for a compare-and-swap version mismatch.
 const VERSION_MISMATCH_MARKER: &str = "CONFLICT_VERSION_MISMATCH";
+
+/// The `reason` for a suggestion that can only be accepted in the editor.
+const NEEDS_EDITOR_REASON: &str = "suggestion_needs_editor";
+
+/// The `reason` for a comment thread whose `if_state_version` precondition no
+/// longer holds.
+const STATE_VERSION_CONFLICT_REASON: &str = "state_version_conflict";
 
 /// Decide what a `CliError`-rooted failure should print on stderr.
 ///
@@ -417,6 +439,8 @@ async fn dispatch(
         Commands::Download(c) => commands::download::execute(&map_download_command(c), ctx).await,
         Commands::Share(c) => commands::share::execute(&map_share_command(c), ctx).await,
         Commands::Comment(c) => commands::comment::execute(&map_comment_command(c), ctx).await,
+        Commands::Suggestion(c) => commands::suggestion::execute(c, ctx).await,
+        Commands::Export(c) => commands::export::execute(c, ctx).await,
         Commands::Event(c) => commands::event::execute(&map_event_command(c), ctx).await,
         Commands::Dashboard(c) => commands::dashboard::execute(c, ctx).await,
         Commands::Preview(c) => commands::preview::execute(&map_preview_command(c), ctx).await,
@@ -432,6 +456,7 @@ async fn dispatch(
             node_id,
             raw,
             version,
+            include_suggestions,
             no_pager,
         } => {
             commands::view::execute(
@@ -440,6 +465,7 @@ async fn dispatch(
                     node_id,
                     raw,
                     version,
+                    include_suggestions,
                     no_pager,
                 },
                 ctx,
@@ -1982,6 +2008,7 @@ fn map_comment_command(cmd: cli::CommentCommands) -> CommentCommand {
             sort,
             limit,
             offset,
+            filters,
         } => CommentCommand::List {
             entity_type,
             entity_id,
@@ -1989,6 +2016,7 @@ fn map_comment_command(cmd: cli::CommentCommands) -> CommentCommand {
             sort,
             limit,
             offset,
+            filters,
         },
         cli::CommentCommands::Create {
             node_id,
@@ -1996,6 +2024,10 @@ fn map_comment_command(cmd: cli::CommentCommands) -> CommentCommand {
             entity_type,
             entity_id,
             reference,
+            quote,
+            prefix,
+            suffix,
+            occurrence,
             properties,
             target_id,
             target_ids,
@@ -2005,6 +2037,12 @@ fn map_comment_command(cmd: cli::CommentCommands) -> CommentCommand {
             node_id,
             text,
             reference,
+            quote: quote.map(|exact| commands::comment::QuoteArgs {
+                exact,
+                prefix,
+                suffix,
+                occurrence,
+            }),
             properties,
             target_id,
             target_ids,
@@ -2015,13 +2053,49 @@ fn map_comment_command(cmd: cli::CommentCommands) -> CommentCommand {
             node_id,
             entity_type,
             entity_id,
+            reopen,
         } => CommentCommand::Reply {
             entity_type,
             entity_id,
             node_id,
             comment_id,
             text,
+            reopen,
         },
+        cli::CommentCommands::Resolve {
+            comment_id,
+            if_state_version,
+        } => CommentCommand::Resolve {
+            comment_id,
+            if_state_version,
+        },
+        cli::CommentCommands::Reopen {
+            comment_id,
+            if_state_version,
+        } => CommentCommand::Reopen {
+            comment_id,
+            if_state_version,
+        },
+        cli::CommentCommands::Assign {
+            comment_id,
+            assign_self,
+            ripley,
+            user_id,
+            agent_name,
+            credential_type,
+            credential_id,
+        } => CommentCommand::Assign {
+            comment_id,
+            target: commands::comment::AssignTarget {
+                assign_self,
+                ripley,
+                user_id,
+                agent_name,
+                credential_type,
+                credential_id,
+            },
+        },
+        cli::CommentCommands::Unassign { comment_id } => CommentCommand::Unassign { comment_id },
         cli::CommentCommands::Edit { comment_id, text } => {
             CommentCommand::Edit { comment_id, text }
         }
@@ -2032,12 +2106,14 @@ fn map_comment_command(cmd: cli::CommentCommands) -> CommentCommand {
             sort,
             limit,
             offset,
+            filters,
         } => CommentCommand::ListAll {
             entity_type,
             entity_id,
             sort,
             limit,
             offset,
+            filters,
         },
         cli::CommentCommands::Info { comment_id } => CommentCommand::Info { comment_id },
         cli::CommentCommands::React { comment_id, emoji } => {
@@ -2900,8 +2976,67 @@ fn map_system_command(cmd: &cli::SystemCommands) -> SystemCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{EXIT_CONFLICT, EXIT_FAILURE, cli_error_render, exit_code_for};
+    use super::{EXIT_CONFLICT, EXIT_FAILURE, EXIT_NEEDS_EDITOR, cli_error_render, exit_code_for};
     use fastio_cli::error::{ApiError, CliError};
+
+    fn suggestion_refusal(status: u16, params: &serde_json::Value) -> CliError {
+        CliError::Api(
+            ApiError::new(170_001, None, "refused".to_owned(), status)
+                .with_details(serde_json::json!({ "params": params })),
+        )
+    }
+
+    /// Each accept outcome has its own exit code: only needs-editor is 5;
+    /// every other refusal — stale included — is a plain failure, never the
+    /// "re-read and retry" conflict code.
+    #[test]
+    fn exit_code_for_each_accept_outcome() {
+        for retryable in [true, false] {
+            let err = suggestion_refusal(
+                409,
+                &serde_json::json!({
+                    "reason": "suggestion_needs_editor",
+                    "editor_reason": "room_busy",
+                    "retryable": retryable
+                }),
+            );
+            assert_eq!(exit_code_for(&err), EXIT_NEEDS_EDITOR);
+        }
+        for (status, reason) in [
+            (409, "suggestion_stale"),
+            (409, "suggestion_not_pending"),
+            (503, "suggestion_apply_unavailable"),
+            (503, "suggestion_apply_unknown"),
+            (403, "suggestion_accept_forbidden"),
+        ] {
+            let err = suggestion_refusal(status, &serde_json::json!({ "reason": reason }));
+            assert_eq!(exit_code_for(&err), EXIT_FAILURE, "{reason}");
+        }
+        // A re-hinted needs-editor error keeps its code.
+        let mapped = CliError::MappedApi {
+            api: ApiError::new(1, None, "x".to_owned(), 409).with_details(
+                serde_json::json!({ "params": { "reason": "suggestion_needs_editor" } }),
+            ),
+            hint: None,
+        };
+        assert_eq!(exit_code_for(&mapped), EXIT_NEEDS_EDITOR);
+        assert_eq!(EXIT_NEEDS_EDITOR, 5, "exit codes are a public contract");
+    }
+
+    /// A failed `--if-state-version` on resolve / reopen is a compare-and-swap
+    /// miss, so it exits with the conflict code (re-read, then decide).
+    #[test]
+    fn exit_code_state_version_conflict_is_conflict() {
+        let err = suggestion_refusal(
+            409,
+            &serde_json::json!({ "reason": "state_version_conflict" }),
+        );
+        assert_eq!(exit_code_for(&err), EXIT_CONFLICT);
+        assert_eq!(
+            err.suggestion(),
+            Some(fastio_cli::error::HINT_COMMENT_STATE_VERSION)
+        );
+    }
 
     /// An ordinary API failure keeps the historical exit code, so nothing that
     /// already checks for non-zero (or for `1` specifically) changes meaning.

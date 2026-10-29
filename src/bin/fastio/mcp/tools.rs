@@ -34,9 +34,64 @@ use super::{LoginResult, McpState, PendingLogin};
 /// more token-efficient for LLM consumers than pretty-printed JSON
 /// across typical Fast.io list/details payloads, so MCP tool responses
 /// use it by default.
+///
+/// Every tool result passes through here, so this is where an agent
+/// assignee's credential id is removed (see
+/// [`strip_assignee_credential_ids`]) — comment rows also travel inside note
+/// reads and search results, not only the comment tool.
 fn success_json(value: &Value) -> CallToolResult {
-    let text = fastio_cli::output::markdown::to_markdown(value);
+    let text = fastio_cli::output::markdown::to_markdown(&without_assignee_credential_ids(value));
     CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
+/// `value` with every `assignee.agent.credential_id` removed. Borrows when
+/// there is none, so the common response is not deep-cloned.
+fn without_assignee_credential_ids(value: &Value) -> std::borrow::Cow<'_, Value> {
+    if has_assignee_credential_id(value) {
+        let mut owned = value.clone();
+        strip_assignee_credential_ids(&mut owned);
+        std::borrow::Cow::Owned(owned)
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
+/// Whether any `assignee.agent.credential_id` occurs in `value`.
+fn has_assignee_credential_id(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.get("assignee")
+                .and_then(|a| a.get("agent"))
+                .is_some_and(|agent| agent.get("credential_id").is_some())
+                || map.values().any(has_assignee_credential_id)
+        }
+        Value::Array(items) => items.iter().any(has_assignee_credential_id),
+        _ => false,
+    }
+}
+
+/// Remove `assignee.agent.credential_id` from every comment row in `value`,
+/// at any depth (list pages, threads with nested `replies`, single rows,
+/// rows embedded in note reads or search results).
+///
+/// The server returns an agent assignee's credential id to the assignee and
+/// to moderators; MCP output is read by agents and relayed onward, so the id
+/// is dropped. Every other assignee field is kept. The CLI does not strip it.
+fn strip_assignee_credential_ids(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(agent) = map
+                .get_mut("assignee")
+                .and_then(|a| a.get_mut("agent"))
+                .and_then(Value::as_object_mut)
+            {
+                agent.remove("credential_id");
+            }
+            map.values_mut().for_each(strip_assignee_credential_ids);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_assignee_credential_ids),
+        _ => {}
+    }
 }
 
 /// Build an error MCP tool result (`is_error` = true).
@@ -929,7 +984,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "workspace",
-        description: "Workspaces: list, create, view, update, delete, archive/unarchive, members, shares, notes, metadata, import/export. SIDE EFFECTS — these metadata actions SPEND AI CREDITS: 'metadata-extract', 'metadata-extract-and-wait'. 'metadata-extract-and-wait' enqueues a single-file extraction and polls workspace jobs-status to a terminal state before returning.",
+        description: "Workspaces: list, create, view, update, delete, archive/unarchive, members, shares, notes, metadata, import/export. SIDE EFFECTS — these metadata actions SPEND AI CREDITS: 'metadata-extract', 'metadata-extract-and-wait'. 'metadata-extract-and-wait' enqueues a single-file extraction and polls workspace jobs-status to a terminal state before returning. 'export-note' renders a note to pdf/docx/odt/html/txt/md on the server (a write: with destination=workspace, the default, it saves a new file, or a new note for md) and, once the server accepts the job, waits up to about 25 s; if it is still queued/running, or checking it failed, call 'export-status' with the returned export_id instead of calling export-note again. 'export-status' is a read: one status check, and with output_path it saves a finished download-destination export to that local path. A failed export comes back as an error result with its record and a hint, and is never re-submitted.",
         actions: &[
             "list",
             "create",
@@ -949,6 +1004,8 @@ const TOOL_DEFS: &[ToolDef] = &[
             "create-note",
             "update-note",
             "read-note",
+            "export-note",
+            "export-status",
             "enable-import",
             "disable-import",
             "metadata-delete",
@@ -1028,8 +1085,13 @@ const TOOL_DEFS: &[ToolDef] = &[
             ),
             ("confirm", "Confirmation string (delete)", false),
             ("share_id", "Share ID (import-share)", false),
-            ("node_id", "Node ID (notes, metadata)", false),
-            ("parent_id", "Parent folder ID (create-note)", false),
+            ("node_id", "Node ID (notes, metadata, export-note)", false),
+            (
+                "parent_id",
+                "Parent folder ID (create-note; export-note with destination=workspace, default: \
+                 the note's folder)",
+                false,
+            ),
             (
                 "content",
                 "Note markdown content, max 100KB (required for create-note)",
@@ -1042,7 +1104,67 @@ const TOOL_DEFS: &[ToolDef] = &[
             ),
             (
                 "version_id",
-                "Specific note version to read (read-note)",
+                "Specific note version to read (read-note) or export (export-note)",
+                false,
+            ),
+            (
+                "format",
+                "export-note (required): pdf | docx | odt | html | txt | md",
+                false,
+            ),
+            (
+                "comments",
+                "export-note: none (default) | margin (PDF margin column) | native (DOCX/ODT \
+                 comment threads) | endnotes (appendix; complete thread text)",
+                false,
+            ),
+            (
+                "include_resolved",
+                "export-note: include resolved comment threads (boolean, default false)",
+                false,
+            ),
+            (
+                "suggestions",
+                "export-note: none (default) | native (pending suggestions as tracked changes; \
+                 docx/odt only)",
+                false,
+            ),
+            (
+                "page_size",
+                "export-note: letter (default) | a4 (pdf, docx, odt)",
+                false,
+            ),
+            (
+                "margins",
+                "export-note: narrow | normal (default) | wide (pdf, docx, odt)",
+                false,
+            ),
+            (
+                "file_name",
+                "export-note: name for the exported file",
+                false,
+            ),
+            (
+                "destination",
+                "export-note: workspace (default; saves a new file, or a new note for md, and \
+                 returns its node_id) | \
+                 download (fetch it locally with export-status output_path)",
+                false,
+            ),
+            (
+                "export_id",
+                "export-status (required): the export_id returned by export-note",
+                false,
+            ),
+            (
+                "output_path",
+                "export-status: local file path to save a finished download-destination export to",
+                false,
+            ),
+            (
+                "include_suggestions",
+                "read-note: also return the note's pending suggested edits as `suggestions` \
+                 (boolean; the note text itself is unchanged)",
                 false,
             ),
             (
@@ -1899,11 +2021,12 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "comment",
-        description: "Comments: list, list-all, create, reply, update, delete, bulk-delete, details, reaction-add, reaction-remove, list-attachments, attach, detach. create accepts an optional anchoring reference + properties metadata and inline attachment(s) (target_id / target_ids, ≤25). attach/detach/list-attachments are author-only (the server enforces).",
+        description: "Comments and suggested edits: list, list-all, create (alias add), reply, update, delete, bulk-delete, details, reaction-add, reaction-remove, list-attachments, attach, detach, resolve, reopen, assign, unassign, suggestion-add, suggestion-list, suggestion-edit, suggestion-withdraw, suggestion-accept, suggestion-reject. create accepts an optional anchoring reference + properties metadata and inline attachment(s) (target_id / target_ids, ≤25); add with parent_comment_id is a reply. QUOTE ANCHORS: create and suggestion-add take exact (the passage as it reads, not its markdown) plus optional prefix/suffix; missing context is read from the note, a passage that appears more than once is refused unless prefix/suffix or occurrence (1-based) makes it unique, and a passage not found in the stored note is still anchored with a warning. FILTERS (list, list-all): status open|resolved|all, for_me true|\"agents\", kind comment|suggestion|all, include_suggestions, group=threads (each root with its replies, plus counts and limits). resolve/reopen/assign/unassign act on ROOT comments; resolve/reopen take an optional if_state_version. assign takes assignee \"self\" or \"ripley\", or assignee_user_id (+ agent_name and credential_type, optional credential_id). AGENT TIPS: when you pick up a thread, publish an intent with topic \"comment:<root_comment_id>\" (`fastio intents`); reply with a summary of what you did and leave resolving to a person; for a requested review, suggest (suggestion-add) rather than editing the note directly; do not accept your own suggestions. DESTRUCTIVE: suggestion-accept rewrites the note text, and suggestion-withdraw cannot be undone here. suggestion-accept is sent ONCE and never retried by this tool (the fastio CLI retries once; MCP does not): on a retryable suggestion_needs_editor or a suggestion_apply_unknown, re-read the note and the suggestion's state before accepting again (a repeat accept never applies twice). suggestion-reject changes no text. attach/detach/list-attachments are author-only (the server enforces).",
         actions: &[
             "list",
             "list-all",
             "create",
+            "add",
             "reply",
             "update",
             "delete",
@@ -1914,6 +2037,16 @@ const TOOL_DEFS: &[ToolDef] = &[
             "list-attachments",
             "attach",
             "detach",
+            "resolve",
+            "reopen",
+            "assign",
+            "unassign",
+            "suggestion-add",
+            "suggestion-list",
+            "suggestion-edit",
+            "suggestion-withdraw",
+            "suggestion-accept",
+            "suggestion-reject",
             // Universal: every tool self-describes. Declared so a STRICT
             // client will actually send it — the router has always accepted
             // it, but a schema that omits it makes the call look invalid.
@@ -1966,6 +2099,102 @@ const TOOL_DEFS: &[ToolDef] = &[
             ),
             ("limit", "Pagination limit (integer)", false),
             ("offset", "Pagination offset (integer)", false),
+            (
+                "parent_comment_id",
+                "add/create: reply to this comment instead of starting a thread",
+                false,
+            ),
+            (
+                "reopen",
+                "reply / add with parent_comment_id: also reopen a resolved thread (boolean)",
+                false,
+            ),
+            (
+                "exact",
+                "Quote anchor (create, suggestion-add): the quoted passage as it reads, at most 500 characters",
+                false,
+            ),
+            (
+                "prefix",
+                "Quote anchor: text immediately before the passage (default: read from the note; may be empty)",
+                false,
+            ),
+            (
+                "suffix",
+                "Quote anchor: text immediately after the passage (default: read from the note; may be empty)",
+                false,
+            ),
+            (
+                "occurrence",
+                "Quote anchor: when the passage appears more than once, the 1-based match to use",
+                false,
+            ),
+            (
+                "status",
+                "list/list-all/suggestion-list filter: open, resolved, or all",
+                false,
+            ),
+            (
+                "for_me",
+                "list/list-all/suggestion-list filter: true (assigned to me or mentioning me) or \"agents\" (assigned to me through one of my agents)",
+                false,
+            ),
+            (
+                "kind",
+                "list/list-all filter: comment, suggestion, or all",
+                false,
+            ),
+            (
+                "include_suggestions",
+                "list/list-all: include suggested-edit threads (boolean; hidden by default)",
+                false,
+            ),
+            (
+                "group",
+                "list/list-all/suggestion-list: \"threads\" pages by root thread with replies embedded, plus counts and limits",
+                false,
+            ),
+            (
+                "if_state_version",
+                "resolve/reopen: only act if the thread is still at this state version (integer)",
+                false,
+            ),
+            (
+                "assignee",
+                "assign: \"self\" or \"ripley\" (or use assignee_user_id)",
+                false,
+            ),
+            ("assignee_user_id", "assign: the user to assign", false),
+            (
+                "agent_name",
+                "assign with assignee_user_id: through this agent of theirs (needs credential_type)",
+                false,
+            ),
+            (
+                "credential_type",
+                "assign: the agent's credential type: oauth, api_key, or platform",
+                false,
+            ),
+            (
+                "credential_id",
+                "assign: the agent's credential id (optional)",
+                false,
+            ),
+            (
+                "op",
+                "suggestion-add/suggestion-edit: replace (default) or delete",
+                false,
+            ),
+            (
+                "replacement",
+                "suggestion-add/suggestion-edit: the replacement text, sent exactly as given",
+                false,
+            ),
+            (
+                "note",
+                "suggestion-add/suggestion-edit: why you suggest this (optional)",
+                false,
+            ),
         ],
     },
     ToolDef {
@@ -5786,6 +6015,339 @@ fn build_workspace_update_fields(
     fields
 }
 
+/// How long `workspace export-note` waits for the job before handing back
+/// its export id.
+const MCP_EXPORT_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Read an optional enumerated string, defaulting when absent and refusing a
+/// value outside `allowed` (or a non-string) instead of dropping it.
+fn optional_choice<'a>(
+    args: &'a Map<String, Value>,
+    key: &str,
+    allowed: &[&str],
+    default: &'a str,
+) -> Result<&'a str, CallToolResult> {
+    let value = optional_str_strict(args, key)?.unwrap_or(default);
+    if allowed.contains(&value) {
+        Ok(value)
+    } else {
+        Err(error_text(&format!(
+            "invalid {key} '{value}' (valid: {})",
+            allowed.join(", ")
+        )))
+    }
+}
+
+/// Read `export-note`'s parameters. Every enumerated value is checked, and a
+/// present value of the wrong type is refused rather than read as absent.
+fn export_note_params<'a>(
+    args: &'a Map<String, Value>,
+    idempotency_key: &'a str,
+) -> Result<fastio_cli::api::export::StartExportParams<'a>, CallToolResult> {
+    use fastio_cli::api::export as ex;
+    let workspace_id = required_str(args, "workspace_id")?;
+    let node_id = required_str(args, "node_id")?;
+    let format = required_str(args, "format")?;
+    let comments = optional_choice(
+        args,
+        "comments",
+        ex::EXPORT_COMMENT_MODES,
+        ex::DEFAULT_COMMENT_MODE,
+    )?;
+    let page_size = optional_choice(
+        args,
+        "page_size",
+        ex::EXPORT_PAGE_SIZES,
+        ex::DEFAULT_PAGE_SIZE,
+    )?;
+    let margins = optional_choice(args, "margins", ex::EXPORT_MARGINS, ex::DEFAULT_MARGINS)?;
+    let suggestions = optional_choice(args, "suggestions", &["none", "native"], "none")?;
+    let destination =
+        optional_choice(args, "destination", &["workspace", "download"], "workspace")?;
+    let parent_id = optional_str_strict(args, "parent_id")?;
+    if destination == "download" && parent_id.is_some() {
+        return Err(error_text(
+            "parent_id applies only to destination=workspace",
+        ));
+    }
+    let params = ex::StartExportParams {
+        workspace_id,
+        node_id,
+        format,
+        version_id: optional_str_strict(args, "version_id")?,
+        file_name: optional_str_strict(args, "file_name")?,
+        page_size,
+        margins,
+        comments,
+        include_resolved: optional_bool_strict(args, "include_resolved")?.unwrap_or(false),
+        tracked_changes: suggestions == "native",
+        destination: if destination == "workspace" {
+            ex::ExportDestination::Workspace { parent_id }
+        } else {
+            ex::ExportDestination::Download
+        },
+        idempotency_key,
+    };
+    ex::validate_start(&params).map_err(|e| cli_err_to_result(&e))?;
+    Ok(params)
+}
+
+/// `workspace export-note`: start a note export and wait up to `wait` for it.
+///
+/// Sends one fresh idempotency key, reused on transport replays of the start.
+/// Returns the job as it stands when it finishes or the wait runs out; a job
+/// still queued or running comes back with its `export_id` for
+/// `export-status`. Nothing is ever re-submitted.
+async fn export_note(
+    client: &fastio_cli::client::ApiClient,
+    args: &Map<String, Value>,
+    wait: std::time::Duration,
+) -> CallToolResult {
+    use fastio_cli::api::export as ex;
+    let idempotency_key = match ex::new_idempotency_key() {
+        Ok(k) => k,
+        Err(e) => return cli_err_to_result(&e),
+    };
+    let params = match export_note_params(args, &idempotency_key) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let payload = match ex::start_export(client, &params).await {
+        Ok(v) => v,
+        Err(e) => return cli_err_to_result(&e),
+    };
+    let Some(record) = ex::export_record(&payload).cloned() else {
+        return error_text("the server's reply carries no export record");
+    };
+    let Some(export_id) = ex::export_id(&record) else {
+        return error_text("the server's reply carries no export id");
+    };
+    let started_status = record
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let outcome = ex::poll_export(
+        Some(record),
+        || ex::export_status(client, &export_id),
+        wait,
+        ex::PollPolicy::DEFAULT,
+    )
+    .await;
+    match outcome {
+        Ok(ex::PollOutcome::Finished(record) | ex::PollOutcome::DeadlineReached(Some(record))) => {
+            export_result(&record, &export_id, None)
+        }
+        Ok(_) => success_json(&serde_json::json!({
+            "export_id": export_id,
+            "status": "queued",
+            "next": export_next(&export_id, "queued", false),
+        })),
+        // The job exists: hand back its id so the agent checks it instead of
+        // starting a second export.
+        Err(e) => {
+            let mut view = serde_json::json!({
+                "export_id": export_id,
+                "status": started_status,
+                "error": e.to_string(),
+                "next": format!(
+                    "the export was started but checking it failed: call workspace \
+                     export-status with export_id {export_id}; do not call export-note again"
+                ),
+            });
+            if let (Some(hint), Some(obj)) = (e.suggestion(), view.as_object_mut()) {
+                obj.insert("hint".to_owned(), Value::from(hint));
+            }
+            let mut result = success_json(&view);
+            result.is_error = Some(true);
+            result
+        }
+    }
+}
+
+/// [`export_view`] as a tool result, flagged as an error when the job failed.
+fn export_result(record: &Value, export_id: &str, saved: Option<(String, u64)>) -> CallToolResult {
+    let mut result = success_json(&export_view(record, export_id, saved));
+    if fastio_cli::api::export::export_state(record) == fastio_cli::api::export::ExportState::Failed
+    {
+        result.is_error = Some(true);
+    }
+    result
+}
+
+/// `workspace export-status`: one status check; with `output_path`, save a
+/// finished download-destination export there through the no-redirect,
+/// JSON-refusing download.
+async fn export_status_check(
+    client: &fastio_cli::client::ApiClient,
+    args: &Map<String, Value>,
+) -> CallToolResult {
+    use fastio_cli::api::export as ex;
+    let export_id = match required_str(args, "export_id") {
+        Ok(v) => v.trim(),
+        Err(e) => return e,
+    };
+    // Target-selecting: a present non-string must not be read as absent.
+    if let Err(e) = validate_string_arg(
+        args,
+        "output_path",
+        "a destination path; a non-string would silently skip the download",
+    ) {
+        return e;
+    }
+    let raw_output_path = optional_str(args, "output_path");
+    if let Some(raw) = raw_output_path
+        && (raw.trim().is_empty() || raw.contains('\0'))
+    {
+        return error_text("output_path must be a non-empty file path without NUL bytes");
+    }
+    let output_path = raw_output_path.map(std::path::PathBuf::from);
+    // Refuse a path that cannot be written before any request is made.
+    if let Some(path) = &output_path {
+        if path.is_dir() {
+            return error_text(&format!(
+                "output_path must be a file path, not a directory: {}",
+                path.display()
+            ));
+        }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.is_dir()
+        {
+            return error_text(&format!(
+                "output_path's directory does not exist: {}",
+                parent.display()
+            ));
+        }
+    }
+    let payload = match ex::export_status(client, export_id).await {
+        Ok(v) => v,
+        Err(e) => return cli_err_to_result(&e),
+    };
+    let Some(record) = ex::export_record(&payload).cloned() else {
+        return error_text("the server's reply carries no export record");
+    };
+    let downloadable = ex::export_state(&record) == ex::ExportState::Succeeded
+        && ex::saved_node_id(&record).is_none();
+    let Some(path) = output_path else {
+        return export_result(&record, export_id, None);
+    };
+    if !downloadable {
+        // Say why the requested path was not written.
+        let mut view = export_view(&record, export_id, None);
+        if let Some(obj) = view.as_object_mut() {
+            obj.insert(
+                "note".to_owned(),
+                Value::from(export_path_ignored_note(&record)),
+            );
+        }
+        let mut result = success_json(&view);
+        if ex::export_state(&record) == ex::ExportState::Failed {
+            result.is_error = Some(true);
+        }
+        return result;
+    }
+    match ex::download_export(client, export_id, &path).await {
+        Ok(bytes) => export_result(
+            &record,
+            export_id,
+            Some((path.display().to_string(), bytes)),
+        ),
+        // Keep the report and the id: the export itself is fine and can be
+        // fetched again.
+        Err(e) => {
+            let mut view = export_view(&record, export_id, None);
+            if let Some(obj) = view.as_object_mut() {
+                obj.insert("download_error".to_owned(), Value::from(e.to_string()));
+                if let Some(hint) = e.suggestion() {
+                    obj.insert("hint".to_owned(), Value::from(hint));
+                }
+                obj.insert(
+                    "next".to_owned(),
+                    Value::from(format!(
+                        "nothing was written to {}: call workspace export-status with export_id \
+                         {export_id} and output_path again (the file is kept for 24 hours)",
+                        path.display()
+                    )),
+                );
+            }
+            let mut result = success_json(&view);
+            result.is_error = Some(true);
+            result
+        }
+    }
+}
+
+/// Why `export-status` wrote nothing to the `output_path` it was given.
+fn export_path_ignored_note(record: &Value) -> String {
+    use fastio_cli::api::export as ex;
+    if let Some(node) = ex::saved_node_id(record) {
+        return format!(
+            "output_path was not used: this export was saved in the workspace as node {node}"
+        );
+    }
+    if ex::export_state(record) == ex::ExportState::Failed {
+        return "output_path was not used: the export failed".to_owned();
+    }
+    let state = record
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!("output_path was not used: the export is still {state}")
+}
+
+/// The agent-facing view of an export record.
+///
+/// Carries `export_id`, the record's own fields, a `hint` for a failure, and a
+/// `next` step while there is one. Never a download URL: the file is reachable
+/// only with the session's credentials, so it is saved locally instead.
+fn export_view(record: &Value, export_id: &str, saved: Option<(String, u64)>) -> Value {
+    use fastio_cli::api::export as ex;
+    let mut view = serde_json::Map::new();
+    view.insert("export_id".to_owned(), Value::from(export_id));
+    if let Some(obj) = record.as_object() {
+        for (k, v) in obj {
+            view.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    if let Some(Value::Object(output)) = view.get_mut("output") {
+        output.remove("download_url");
+    }
+    if let Some(err) = ex::failure_error(record)
+        && let Some(hint) = err.suggestion()
+    {
+        view.insert("hint".to_owned(), Value::from(hint));
+    }
+    let state = record
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let needs_download = ex::export_state(record) == ex::ExportState::Succeeded
+        && ex::saved_node_id(record).is_none();
+    if let Some((path, bytes)) = saved {
+        view.insert("saved_to".to_owned(), Value::from(path));
+        view.insert("bytes".to_owned(), Value::from(bytes));
+    } else if let Some(next) = export_next(export_id, state, needs_download) {
+        view.insert("next".to_owned(), Value::from(next));
+    }
+    Value::Object(view)
+}
+
+/// The next step for an export in `state`, if any.
+fn export_next(export_id: &str, state: &str, needs_download: bool) -> Option<String> {
+    match state {
+        "queued" | "running" => Some(format!(
+            "still {state}: call workspace export-status with export_id {export_id} in a few \
+             seconds"
+        )),
+        "succeeded" if needs_download => Some(format!(
+            "call workspace export-status with export_id {export_id} and output_path to save \
+             the file locally (kept for 24 hours)"
+        )),
+        _ => None,
+    }
+}
+
 /// Workspace tool handler.
 #[allow(clippy::too_many_lines)]
 async fn handle_workspace(
@@ -6073,11 +6635,23 @@ async fn handle_workspace(
                 Ok(v) => v,
                 Err(e) => return Ok(e),
             };
-            match api::workspace::read_note(&client, ws_id, node_id, version_id).await {
+            let include_suggestions = match optional_bool_strict(args, "include_suggestions") {
+                Ok(v) => v.unwrap_or(false),
+                Err(e) => return Ok(e),
+            };
+            let result = if include_suggestions {
+                api::workspace::read_note_with_suggestions(&client, ws_id, node_id, version_id)
+                    .await
+            } else {
+                api::workspace::read_note(&client, ws_id, node_id, version_id).await
+            };
+            match result {
                 Ok(v) => Ok(success_json(&v)),
                 Err(e) => Ok(cli_err_to_result(&e)),
             }
         }
+        "export-note" => Ok(export_note(&client, args, MCP_EXPORT_WAIT).await),
+        "export-status" => Ok(export_status_check(&client, args).await),
         "jobs-status" => {
             let ws_id = match required_str(args, "workspace_id") {
                 Ok(v) => v,
@@ -9823,7 +10397,9 @@ async fn handle_comment(
     }
     match action {
         "list" => handle_comment_list(state, args).await,
-        "create" => handle_comment_create(state, args).await,
+        // `add` is the cross-surface name for create; with parent_comment_id
+        // it is a reply.
+        "create" | "add" => handle_comment_create(state, args).await,
         "reply" => handle_comment_reply(state, args).await,
         "update" => handle_comment_update(state, args).await,
         "delete" => handle_comment_delete(state, args).await,
@@ -9835,8 +10411,134 @@ async fn handle_comment(
         "list-attachments" => handle_comment_list_attachments(state, args).await,
         "attach" => handle_comment_attach(state, args).await,
         "detach" => handle_comment_detach(state, args).await,
+        "resolve" | "reopen" => handle_comment_thread_state(state, action, args).await,
+        "assign" => handle_comment_assign(state, args).await,
+        "unassign" => handle_comment_unassign(state, args).await,
+        "suggestion-add" => handle_suggestion_add(state, args).await,
+        "suggestion-list" => handle_suggestion_list(state, args).await,
+        "suggestion-edit" => handle_suggestion_edit(state, args).await,
+        "suggestion-withdraw" | "suggestion-reject" | "suggestion-accept" => {
+            handle_suggestion_decision(state, action, args).await
+        }
         _ => Ok(error_text(&format!("Unknown comment action: {action}"))),
     }
+}
+
+/// Read the comment-list filters (`status`, `for_me`, `kind`,
+/// `include_suggestions`, `group`). Each is validated against the same value
+/// list the CLI's flags use; anything unset is not sent.
+fn comment_list_filters(
+    args: &Map<String, Value>,
+) -> Result<api::comment::CommentListFilters<'_>, CallToolResult> {
+    let one_of = |key: &str, allowed: &[&str]| -> Result<Option<&str>, CallToolResult> {
+        // Re-borrow from `args` so the result outlives this closure.
+        match optional_str_strict(args, key)? {
+            None => Ok(None),
+            Some(v) if allowed.contains(&v) => Ok(Some(v)),
+            Some(v) => Err(error_text(&format!(
+                "invalid {key} '{v}'. Must be one of: {}",
+                allowed.join(", ")
+            ))),
+        }
+    };
+    let status = one_of("status", api::comment::COMMENT_STATUS_VALUES)?;
+    let kind = one_of("kind", api::comment::COMMENT_KIND_VALUES)?;
+    // `for_me` is `true` or "agents"; `false` (either spelling) means unset.
+    let for_me = match args.get("for_me") {
+        None | Some(Value::Null | Value::Bool(false)) => None,
+        Some(Value::Bool(true)) => Some("true"),
+        Some(Value::String(v)) if v == "false" => None,
+        Some(Value::String(v)) if v == "true" => Some("true"),
+        Some(Value::String(v)) if v == "agents" => Some("agents"),
+        Some(_) => {
+            return Err(error_text(
+                "invalid for_me. Must be true or \"agents\" (omit it, or send false, to leave it unset)",
+            ));
+        }
+    };
+    let include_suggestions = optional_bool_strict(args, "include_suggestions")?.unwrap_or(false);
+    let threads = match optional_str_strict(args, "group")? {
+        None => false,
+        Some("threads") => true,
+        Some(v) => {
+            return Err(error_text(&format!(
+                "invalid group '{v}'. The only grouping is \"threads\""
+            )));
+        }
+    };
+    Ok(api::comment::CommentListFilters {
+        status,
+        for_me,
+        kind,
+        include_suggestions,
+        threads,
+    })
+}
+
+/// Read the quote-anchor params (`exact`, `prefix`, `suffix`, `occurrence`).
+/// `None` when no `exact` was given; context without a quote is refused.
+fn comment_quote_request(
+    args: &Map<String, Value>,
+) -> Result<Option<api::comment::QuoteRequest<'_>>, CallToolResult> {
+    let exact = optional_str_strict(args, "exact")?;
+    let prefix = optional_str_strict(args, "prefix")?;
+    let suffix = optional_str_strict(args, "suffix")?;
+    let occurrence = optional_u32_strict(args, "occurrence")?;
+    let Some(exact) = exact else {
+        if prefix.is_some() || suffix.is_some() || occurrence.is_some() {
+            return Err(error_text(
+                "prefix, suffix and occurrence describe a quote: pass exact as well",
+            ));
+        }
+        return Ok(None);
+    };
+    Ok(Some(api::comment::QuoteRequest {
+        exact,
+        prefix,
+        suffix,
+        occurrence: occurrence.map(|n| n as usize),
+    }))
+}
+
+/// Resolve a quote anchor into its `reference`, with the not-found warning
+/// when the quote is absent from the stored note.
+async fn comment_quote_reference(
+    client: &fastio_cli::client::ApiClient,
+    entity_type: &str,
+    entity_id: &str,
+    node_id: &str,
+    quote: &api::comment::QuoteRequest<'_>,
+) -> Result<(Value, Option<&'static str>), CallToolResult> {
+    match api::comment::build_quote_reference(client, entity_type, entity_id, node_id, quote).await
+    {
+        Ok((reference, matched)) => Ok((
+            reference,
+            (matched == api::comment::QuoteMatch::NotFound)
+                .then_some(api::comment::QUOTE_NOT_FOUND_WARNING),
+        )),
+        Err(e) => Err(cli_err_to_result(&e)),
+    }
+}
+
+/// [`success_json`] with an optional trailing warning line.
+fn success_json_with_warning(value: &Value, warning: Option<&str>) -> CallToolResult {
+    let Some(warning) = warning else {
+        return success_json(value);
+    };
+    let text = fastio_cli::output::markdown::to_markdown(&without_assignee_credential_ids(value));
+    CallToolResult::success(vec![ContentBlock::text(format!(
+        "{text}\n\nwarning: {warning}"
+    ))])
+}
+
+/// The node-scoped entity triple (`entity_type`, `entity_id`, `node_id`),
+/// validated the way the CLI validates it.
+fn comment_node_entity(args: &Map<String, Value>) -> Result<(&str, &str, &str), CallToolResult> {
+    let entity_type = required_str(args, "entity_type")?;
+    validate_comment_entity_type(entity_type, EntityScope::Node)?;
+    let entity_id = required_str(args, "entity_id")?;
+    let node_id = required_str(args, "node_id")?;
+    Ok((entity_type, entity_id, node_id))
 }
 
 async fn handle_comment_list(
@@ -9844,22 +10546,15 @@ async fn handle_comment_list(
     args: &Map<String, Value>,
 ) -> Result<CallToolResult, McpError> {
     let client = state.client().read().await;
-    let entity_type = match required_str(args, "entity_type") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    if let Err(e) = validate_comment_entity_type(entity_type, EntityScope::Node) {
-        return Ok(e);
-    }
-    let entity_id = match required_str(args, "entity_id") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    let node_id = match required_str(args, "node_id") {
+    let (entity_type, entity_id, node_id) = match comment_node_entity(args) {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
     let sort = match validate_comment_sort(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let filters = match comment_list_filters(args) {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
@@ -9872,6 +10567,7 @@ async fn handle_comment_list(
             sort,
             limit: optional_u32(args, "limit"),
             offset: optional_u32(args, "offset"),
+            filters,
         },
     )
     .await
@@ -9881,26 +10577,17 @@ async fn handle_comment_list(
     }
 }
 
-/// `comment` create action: add a comment, optionally with an anchoring
-/// `reference`, arbitrary `properties`, and inline attachment(s)
-/// (`target_id` single OR `target_ids` batch, ≤25 — mutually exclusive).
+/// `comment` create action (alias `add`): add a comment, optionally with an
+/// anchoring `reference` or a quote anchor (`exact` + optional context),
+/// arbitrary `properties`, and inline attachment(s) (`target_id` single OR
+/// `target_ids` batch, ≤25 — mutually exclusive). With `parent_comment_id`
+/// it is a reply instead (and honours `reopen`).
 async fn handle_comment_create(
     state: &McpState,
     args: &Map<String, Value>,
 ) -> Result<CallToolResult, McpError> {
     let client = state.client().read().await;
-    let entity_type = match required_str(args, "entity_type") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    if let Err(e) = validate_comment_entity_type(entity_type, EntityScope::Node) {
-        return Ok(e);
-    }
-    let entity_id = match required_str(args, "entity_id") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    let node_id = match required_str(args, "node_id") {
+    let (entity_type, entity_id, node_id) = match comment_node_entity(args) {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
@@ -9908,10 +10595,37 @@ async fn handle_comment_create(
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
+    let parent_id = match optional_str_strict(args, "parent_comment_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let reopen = match optional_bool_strict(args, "reopen") {
+        Ok(v) => v.unwrap_or(false),
+        Err(e) => return Ok(e),
+    };
+    if reopen && parent_id.is_none() {
+        return Ok(error_text(
+            "reopen applies to replies: pass parent_comment_id (or use action='reply')",
+        ));
+    }
     let reference = match json_object_arg(args, "reference") {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
+    let quote = match comment_quote_request(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    if quote.is_some() && reference.is_some() {
+        return Ok(error_text(
+            "exact (a quote anchor) and reference are mutually exclusive",
+        ));
+    }
+    if quote.is_some() && parent_id.is_some() {
+        return Ok(error_text(
+            "a reply cannot carry a quote anchor: drop exact, or drop parent_comment_id",
+        ));
+    }
     let properties = match json_object_arg(args, "properties") {
         Ok(v) => v,
         Err(e) => return Ok(e),
@@ -9932,6 +10646,15 @@ async fn handle_comment_create(
             target_ids.len()
         )));
     }
+    let (reference, warning) = match quote {
+        Some(quote) => {
+            match comment_quote_reference(&client, entity_type, entity_id, node_id, &quote).await {
+                Ok((r, w)) => (Some(r), w),
+                Err(e) => return Ok(e),
+            }
+        }
+        None => (reference, None),
+    };
     match api::comment::add_comment(
         &client,
         &api::comment::AddCommentParams {
@@ -9939,16 +10662,17 @@ async fn handle_comment_create(
             entity_id,
             node_id,
             body: text,
-            parent_id: None,
+            parent_id,
             reference: reference.as_ref(),
             properties: properties.as_ref(),
             target_id,
             target_ids: (!target_ids.is_empty()).then_some(target_ids.as_slice()),
+            reopen,
         },
     )
     .await
     {
-        Ok(v) => Ok(success_json(&v)),
+        Ok(v) => Ok(success_json_with_warning(&v, warning)),
         Err(e) => Ok(cli_err_to_result(&e)),
     }
 }
@@ -9958,18 +10682,7 @@ async fn handle_comment_reply(
     args: &Map<String, Value>,
 ) -> Result<CallToolResult, McpError> {
     let client = state.client().read().await;
-    let entity_type = match required_str(args, "entity_type") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    if let Err(e) = validate_comment_entity_type(entity_type, EntityScope::Node) {
-        return Ok(e);
-    }
-    let entity_id = match required_str(args, "entity_id") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    let node_id = match required_str(args, "node_id") {
+    let (entity_type, entity_id, node_id) = match comment_node_entity(args) {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
@@ -9979,6 +10692,10 @@ async fn handle_comment_reply(
     };
     let comment_id = match required_str(args, "comment_id") {
         Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let reopen = match optional_bool_strict(args, "reopen") {
+        Ok(v) => v.unwrap_or(false),
         Err(e) => return Ok(e),
     };
     match api::comment::add_comment(
@@ -9993,10 +10710,338 @@ async fn handle_comment_reply(
             properties: None,
             target_id: None,
             target_ids: None,
+            reopen,
         },
     )
     .await
     {
+        Ok(v) => Ok(success_json(&v)),
+        Err(e) => Ok(cli_err_to_result(&e)),
+    }
+}
+
+/// `comment` resolve / reopen actions (root comments only).
+async fn handle_comment_thread_state(
+    state: &McpState,
+    action: &str,
+    args: &Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let client = state.client().read().await;
+    let comment_id = match required_str(args, "comment_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let if_state_version = match args.get("if_state_version") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v
+            .as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        {
+            Some(n) => Some(n),
+            None => {
+                return Ok(error_text(
+                    "if_state_version must be a non-negative integer",
+                ));
+            }
+        },
+    };
+    let result = if action == "resolve" {
+        api::comment::resolve_comment(&client, comment_id, if_state_version).await
+    } else {
+        api::comment::reopen_comment(&client, comment_id, if_state_version).await
+    };
+    match result {
+        Ok(v) => Ok(success_json(&v)),
+        Err(e) => Ok(cli_err_to_result(&e)),
+    }
+}
+
+/// Read the assignee params: `assignee` ("self" | "ripley") XOR
+/// `assignee_user_id` (+ `agent_name` and `credential_type`, optional
+/// `credential_id`).
+fn comment_assignee(
+    args: &Map<String, Value>,
+) -> Result<api::comment::Assignee<'_>, CallToolResult> {
+    let named = optional_str_strict(args, "assignee")?;
+    let user_id = optional_str_strict(args, "assignee_user_id")?;
+    let agent_name = optional_str_strict(args, "agent_name")?;
+    let credential_type = optional_str_strict(args, "credential_type")?;
+    let credential_id = optional_str_strict(args, "credential_id")?;
+    if user_id.is_none()
+        && (agent_name.is_some() || credential_type.is_some() || credential_id.is_some())
+    {
+        return Err(error_text(
+            "agent_name, credential_type and credential_id qualify assignee_user_id: pass it as well",
+        ));
+    }
+    match (named, user_id) {
+        (Some("self"), None) => Ok(api::comment::Assignee::Caller),
+        (Some("ripley"), None) => Ok(api::comment::Assignee::Ripley),
+        (Some(other), None) => Err(error_text(&format!(
+            "invalid assignee '{other}'. Must be \"self\" or \"ripley\" (or pass assignee_user_id)"
+        ))),
+        (None, Some(user_id)) => {
+            let agent = match (agent_name, credential_type) {
+                (Some(agent_name), Some(credential_type)) => {
+                    if !api::comment::ASSIGNEE_CREDENTIAL_TYPES.contains(&credential_type) {
+                        return Err(error_text(&format!(
+                            "invalid credential_type '{credential_type}'. Must be one of: {}",
+                            api::comment::ASSIGNEE_CREDENTIAL_TYPES.join(", ")
+                        )));
+                    }
+                    Some(api::comment::AgentQualifier {
+                        agent_name,
+                        credential_type,
+                        credential_id,
+                    })
+                }
+                (None, None) if credential_id.is_none() => None,
+                _ => {
+                    return Err(error_text("agent_name and credential_type go together"));
+                }
+            };
+            Ok(api::comment::Assignee::User { user_id, agent })
+        }
+        (Some(_), Some(_)) => Err(error_text(
+            "pass either assignee or assignee_user_id, not both",
+        )),
+        (None, None) => Err(error_text(
+            "Missing assignee: pass assignee (\"self\" or \"ripley\") or assignee_user_id",
+        )),
+    }
+}
+
+async fn handle_comment_assign(
+    state: &McpState,
+    args: &Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let client = state.client().read().await;
+    let comment_id = match required_str(args, "comment_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let assignee = match comment_assignee(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    match api::comment::assign_comment(&client, comment_id, &assignee).await {
+        Ok(v) => Ok(success_json(&v)),
+        Err(e) => Ok(cli_err_to_result(&e)),
+    }
+}
+
+async fn handle_comment_unassign(
+    state: &McpState,
+    args: &Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let client = state.client().read().await;
+    let comment_id = match required_str(args, "comment_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    match api::comment::unassign_comment(&client, comment_id).await {
+        Ok(v) => Ok(success_json(&v)),
+        Err(e) => Ok(cli_err_to_result(&e)),
+    }
+}
+
+/// Read a suggestion's change from `op` (replace | delete) and
+/// `replacement`. `None` when neither is given (an edit of the note only).
+fn suggestion_change(
+    args: &Map<String, Value>,
+) -> Result<Option<api::comment::SuggestionChange<'_>>, CallToolResult> {
+    let op = optional_str_strict(args, "op")?;
+    let replacement = optional_str_strict(args, "replacement")?;
+    match (op, replacement) {
+        (Some("delete"), None | Some("")) => Ok(Some(api::comment::SuggestionChange::Delete)),
+        (Some("delete"), Some(_)) => Err(error_text(
+            "op=delete removes the quoted text: omit replacement",
+        )),
+        (Some("replace") | None, Some(text)) => {
+            Ok(Some(api::comment::SuggestionChange::Replace(text)))
+        }
+        (Some("replace"), None) => Err(error_text("op=replace needs a replacement")),
+        (None, None) => Ok(None),
+        (Some(other), _) => Err(error_text(&format!(
+            "invalid op '{other}'. Must be replace or delete"
+        ))),
+    }
+}
+
+async fn handle_suggestion_add(
+    state: &McpState,
+    args: &Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let client = state.client().read().await;
+    let (entity_type, entity_id, node_id) = match comment_node_entity(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let quote = match comment_quote_request(args) {
+        Ok(Some(q)) => q,
+        Ok(None) => {
+            return Ok(error_text(
+                "Missing required parameter: exact (the passage the suggestion changes)",
+            ));
+        }
+        Err(e) => return Ok(e),
+    };
+    let change = match suggestion_change(args) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return Ok(error_text(
+                "Missing replacement: pass replacement, or op=delete",
+            ));
+        }
+        Err(e) => return Ok(e),
+    };
+    let note = match optional_str_strict(args, "note") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let (reference, warning) =
+        match comment_quote_reference(&client, entity_type, entity_id, node_id, &quote).await {
+            Ok(v) => v,
+            Err(e) => return Ok(e),
+        };
+    match api::comment::add_suggestion(
+        &client,
+        &api::comment::AddSuggestionParams {
+            entity_type,
+            entity_id,
+            node_id,
+            reference: &reference,
+            change,
+            note,
+        },
+    )
+    .await
+    {
+        Ok(v) => {
+            let warning = if api::comment::suggestion_create_was_downgraded(&v) {
+                Some(
+                    "the server created a plain comment, not a suggestion: it does not support \
+                     suggestions yet",
+                )
+            } else {
+                warning
+            };
+            Ok(success_json_with_warning(&v, warning))
+        }
+        Err(e) => Ok(cli_err_to_result(&e)),
+    }
+}
+
+async fn handle_suggestion_list(
+    state: &McpState,
+    args: &Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let client = state.client().read().await;
+    let entity_type = match required_str(args, "entity_type") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let entity_id = match required_str(args, "entity_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let node_id = match optional_str_strict(args, "node_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let sort = match validate_comment_sort(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let mut filters = match comment_list_filters(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    filters.kind = Some("suggestion");
+    let limit = optional_u32(args, "limit");
+    let offset = optional_u32(args, "offset");
+    let result = if let Some(node_id) = node_id {
+        if let Err(e) = validate_comment_entity_type(entity_type, EntityScope::Node) {
+            return Ok(e);
+        }
+        api::comment::list_comments(
+            &client,
+            &api::comment::ListCommentsParams {
+                entity_type,
+                entity_id,
+                node_id,
+                sort,
+                limit,
+                offset,
+                filters,
+            },
+        )
+        .await
+    } else {
+        if let Err(e) = validate_comment_entity_type(entity_type, EntityScope::Container) {
+            return Ok(e);
+        }
+        api::comment::list_all_comments(
+            &client,
+            entity_type,
+            entity_id,
+            sort,
+            limit,
+            offset,
+            &filters,
+        )
+        .await
+    };
+    match result {
+        Ok(v) => Ok(success_json(&v)),
+        Err(e) => Ok(cli_err_to_result(&e)),
+    }
+}
+
+async fn handle_suggestion_edit(
+    state: &McpState,
+    args: &Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let client = state.client().read().await;
+    let comment_id = match required_str(args, "comment_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let change = match suggestion_change(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let note = match optional_str_strict(args, "note") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    match api::comment::edit_suggestion(&client, comment_id, change, note).await {
+        Ok(v) => Ok(success_json(&v)),
+        Err(e) => Ok(cli_err_to_result(&e)),
+    }
+}
+
+/// `comment` suggestion-withdraw / suggestion-reject / suggestion-accept.
+///
+/// Accept is sent exactly once and NEVER retried here, unlike the CLI: a
+/// retryable refusal is returned as-is so the agent re-reads before accepting
+/// again; see [`api::comment::accept_suggestion_once`].
+async fn handle_suggestion_decision(
+    state: &McpState,
+    action: &str,
+    args: &Map<String, Value>,
+) -> Result<CallToolResult, McpError> {
+    let client = state.client().read().await;
+    let comment_id = match required_str(args, "comment_id") {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let result = match action {
+        "suggestion-withdraw" => api::comment::withdraw_suggestion(&client, comment_id).await,
+        "suggestion-reject" => api::comment::reject_suggestion(&client, comment_id).await,
+        _ => api::comment::accept_suggestion_once(&client, comment_id).await,
+    };
+    match result {
         Ok(v) => Ok(success_json(&v)),
         Err(e) => Ok(cli_err_to_result(&e)),
     }
@@ -10059,6 +11104,10 @@ async fn handle_comment_list_all(
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
+    let filters = match comment_list_filters(args) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
     match api::comment::list_all_comments(
         &client,
         entity_type,
@@ -10066,6 +11115,7 @@ async fn handle_comment_list_all(
         sort,
         optional_u32(args, "limit"),
         optional_u32(args, "offset"),
+        &filters,
     )
     .await
     {
@@ -22342,5 +23392,1165 @@ mod ripley_tool_tests {
             captured.lock().expect("capture lock").is_empty(),
             "a refused login-start must not reach the server"
         );
+    }
+
+    // ─── Comments v2 / suggestions ────────────────────────────────────────
+
+    /// An authenticated router against a loopback stub that answers every
+    /// request with `reply` and captures `METHOD /path` plus the body.
+    async fn capturing_router(
+        reply: Value,
+    ) -> (ToolRouter, Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+        capturing_router_with_status(200, reply).await
+    }
+
+    /// [`capturing_router`] answering every request with `status`.
+    async fn capturing_router_with_status(
+        status: u16,
+        reply: Value,
+    ) -> (ToolRouter, Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let seen: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let body = reply.to_string();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                let mut header_end = None;
+                while header_end.is_none() {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                    header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                }
+                let Some(header_end) = header_end else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..header_end]).to_string();
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while raw.len() < header_end + length {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
+                let line = format!(
+                    "{} {}",
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default()
+                );
+                let req_body = String::from_utf8_lossy(&raw[header_end..]).to_string();
+                if let Ok(mut s) = sink.lock() {
+                    s.push((line, req_body));
+                }
+                let header = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(body.as_bytes()).await;
+            }
+        });
+        let state = Arc::new(McpState::new_unauthenticated_for_test(&format!(
+            "http://{addr}"
+        )));
+        state.set_token("test-token".to_owned()).await;
+        (ToolRouter::new_for_tests(state), seen)
+    }
+
+    fn comment_args(action: &str, pairs: &[(&str, Value)]) -> Map<String, Value> {
+        let mut args = Map::new();
+        args.insert("action".to_owned(), Value::String(action.to_owned()));
+        for (k, v) in pairs {
+            args.insert((*k).to_owned(), v.clone());
+        }
+        args
+    }
+
+    fn node_pairs() -> Vec<(&'static str, Value)> {
+        vec![
+            ("entity_type", json!("workspace")),
+            ("entity_id", json!("1000000000000000001")),
+            ("node_id", json!("nabcdefghijklmnopqrstuvwxyz12")),
+        ]
+    }
+
+    #[test]
+    fn comment_tool_advertises_the_v2_actions_and_steering() {
+        let def = super::TOOL_DEFS
+            .iter()
+            .find(|d| d.name == "comment")
+            .expect("comment tool");
+        for action in [
+            "add",
+            "resolve",
+            "reopen",
+            "assign",
+            "unassign",
+            "suggestion-add",
+            "suggestion-list",
+            "suggestion-edit",
+            "suggestion-withdraw",
+            "suggestion-accept",
+            "suggestion-reject",
+        ] {
+            assert!(def.actions.contains(&action), "missing action {action}");
+        }
+        for needle in [
+            "DESTRUCTIVE",
+            "suggestion-accept",
+            "suggestion-withdraw",
+            "comment:<root_comment_id>",
+            "leave resolving to a person",
+            "do not accept your own suggestions",
+        ] {
+            assert!(
+                def.description.contains(needle),
+                "description lacks {needle}"
+            );
+        }
+        for param in [
+            "exact",
+            "prefix",
+            "suffix",
+            "occurrence",
+            "status",
+            "for_me",
+            "kind",
+            "include_suggestions",
+            "group",
+            "reopen",
+            "parent_comment_id",
+            "if_state_version",
+            "assignee",
+            "assignee_user_id",
+            "op",
+            "replacement",
+            "note",
+        ] {
+            assert!(
+                def.params.iter().any(|(name, _, _)| *name == param),
+                "missing param {param}"
+            );
+        }
+    }
+
+    /// Bad input is refused locally (the router's client points at a dead
+    /// port, so a forwarded call would fail as a transport error instead).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn comment_v2_validation_is_local() {
+        let mut list = node_pairs();
+        list.push(("status", json!("bogus")));
+        let cases: Vec<(Map<String, Value>, &str)> = vec![
+            (comment_args("list", &list), "invalid status"),
+            (
+                comment_args(
+                    "list",
+                    &[node_pairs(), vec![("for_me", json!("everyone"))]].concat(),
+                ),
+                "invalid for_me",
+            ),
+            (
+                comment_args(
+                    "list",
+                    &[node_pairs(), vec![("group", json!("pages"))]].concat(),
+                ),
+                "invalid group",
+            ),
+            (
+                comment_args(
+                    "resolve",
+                    &[
+                        ("comment_id", json!("c1")),
+                        ("if_state_version", json!("abc")),
+                    ],
+                ),
+                "if_state_version",
+            ),
+            (
+                comment_args("assign", &[("comment_id", json!("c1"))]),
+                "Missing assignee",
+            ),
+            (
+                comment_args(
+                    "assign",
+                    &[
+                        ("comment_id", json!("c1")),
+                        ("assignee", json!("self")),
+                        ("assignee_user_id", json!("u1")),
+                    ],
+                ),
+                "not both",
+            ),
+            (
+                comment_args(
+                    "assign",
+                    &[("comment_id", json!("c1")), ("assignee", json!("everyone"))],
+                ),
+                "invalid assignee",
+            ),
+            (
+                comment_args(
+                    "create",
+                    &[
+                        node_pairs(),
+                        vec![("text", json!("t")), ("reopen", json!(true))],
+                    ]
+                    .concat(),
+                ),
+                "reopen applies to replies",
+            ),
+            (
+                comment_args(
+                    "create",
+                    &[
+                        node_pairs(),
+                        vec![
+                            ("text", json!("t")),
+                            ("exact", json!("x")),
+                            ("reference", json!({"type": "document"})),
+                        ],
+                    ]
+                    .concat(),
+                ),
+                "mutually exclusive",
+            ),
+            (
+                comment_args(
+                    "create",
+                    &[
+                        node_pairs(),
+                        vec![("text", json!("t")), ("prefix", json!("p"))],
+                    ]
+                    .concat(),
+                ),
+                "pass exact",
+            ),
+            (
+                comment_args(
+                    "suggestion-add",
+                    &[node_pairs(), vec![("replacement", json!("y"))]].concat(),
+                ),
+                "exact",
+            ),
+            (
+                comment_args(
+                    "suggestion-add",
+                    &[node_pairs(), vec![("exact", json!("x"))]].concat(),
+                ),
+                "Missing replacement",
+            ),
+            (
+                comment_args(
+                    "suggestion-add",
+                    &[
+                        node_pairs(),
+                        vec![
+                            ("exact", json!("x")),
+                            ("op", json!("delete")),
+                            ("replacement", json!("y")),
+                        ],
+                    ]
+                    .concat(),
+                ),
+                "omit replacement",
+            ),
+        ];
+        for (args, needle) in cases {
+            let router = authed_router().await;
+            let action = args.get("action").cloned();
+            let res = router
+                .call_tool("comment", args)
+                .await
+                .expect("call_tool ok");
+            let text = result_to_string(&res);
+            assert!(
+                text.contains(needle),
+                "{action:?}: expected `{needle}` in {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn comment_v2_wire_through_the_mcp_tool() {
+        // One reply serves the note read (`content`) and every write
+        // (`comment`).
+        let reply = json!({
+            "result": true,
+            "content": "Ship it on Friday afternoon.",
+            "comment": {"id": "c1", "kind": "suggestion"}
+        });
+        let (router, seen) = capturing_router(reply).await;
+        let calls = vec![
+            comment_args(
+                "list",
+                &[
+                    node_pairs(),
+                    vec![
+                        ("status", json!("open")),
+                        ("for_me", json!(true)),
+                        ("group", json!("threads")),
+                    ],
+                ]
+                .concat(),
+            ),
+            comment_args(
+                "add",
+                &[
+                    node_pairs(),
+                    vec![
+                        ("text", json!("done")),
+                        ("parent_comment_id", json!("c1")),
+                        ("reopen", json!("true")),
+                    ],
+                ]
+                .concat(),
+            ),
+            comment_args(
+                "resolve",
+                &[
+                    ("comment_id", json!("ca-bc")),
+                    ("if_state_version", json!(3)),
+                ],
+            ),
+            comment_args(
+                "assign",
+                &[("comment_id", json!("c1")), ("assignee", json!("self"))],
+            ),
+            comment_args("unassign", &[("comment_id", json!("c1"))]),
+            comment_args(
+                "suggestion-add",
+                &[
+                    node_pairs(),
+                    vec![
+                        ("exact", json!("Friday")),
+                        ("replacement", json!("Thursday")),
+                        ("note", json!("holiday")),
+                    ],
+                ]
+                .concat(),
+            ),
+            comment_args("suggestion-accept", &[("comment_id", json!("c1"))]),
+        ];
+        for args in calls {
+            let res = router
+                .call_tool("comment", args)
+                .await
+                .expect("call_tool ok");
+            assert_ne!(res.is_error, Some(true), "{}", result_to_string(&res));
+        }
+        let seen = seen.lock().map(|s| s.clone()).unwrap_or_default();
+        let body = |i: usize| -> Value { serde_json::from_str(&seen[i].1).unwrap_or(Value::Null) };
+        let base = "/comments/workspace/1000000000000000001/nabcdefghijklmnopqrstuvwxyz12/";
+        assert!(
+            seen[0].0.starts_with(&format!("GET {base}?")),
+            "{}",
+            seen[0].0
+        );
+        for pair in ["status=open", "for_me=true", "group=threads"] {
+            assert!(seen[0].0.contains(pair), "{pair}: {}", seen[0].0);
+        }
+        assert_eq!(seen[1].0, format!("POST {base}"));
+        assert_eq!(
+            body(1),
+            json!({"body": "done", "parent_id": "c1", "reopen": true})
+        );
+        assert_eq!(seen[2].0, "POST /comments/cabc/resolve/");
+        assert_eq!(body(2), json!({"if_state_version": 3}));
+        assert_eq!(body(3), json!({"assignee": "self"}));
+        assert_eq!(body(4), json!({"clear": true}));
+        assert!(
+            seen[5]
+                .0
+                .starts_with("GET /workspace/1000000000000000001/storage/"),
+            "{}",
+            seen[5].0
+        );
+        assert_eq!(
+            body(6),
+            json!({
+                "body": "holiday",
+                "kind": "suggestion",
+                "reference": {"type": "document", "exact": "Friday", "prefix": "Ship it on ", "suffix": " afternoon."},
+                "suggestion": {"op": "replace", "replacement": "Thursday"}
+            })
+        );
+        assert_eq!(seen[7].0, "POST /comments/c1/suggestion/accept/");
+        assert_eq!(body(7), json!({"mode": "headless"}));
+        assert_eq!(seen.len(), 8);
+    }
+
+    #[test]
+    fn assignee_credential_ids_are_stripped_at_any_depth() {
+        let mut page = json!({
+            "threads": [{
+                "id": "c1",
+                "assignee": {
+                    "user_id": "1000000000000000002",
+                    "name": "Pat",
+                    "agent": {"agent_name": "helper", "credential_type": "oauth",
+                              "display": "helper", "credential_id": "secret-cred"}
+                },
+                "replies": [{
+                    "id": "c2",
+                    "assignee": {"user_id": "u3", "agent": {"agent_name": "x", "credential_id": "nested-cred"}}
+                }]
+            }],
+            "comment": {"assignee": {"user_id": "u4", "agent": {"credential_id": "row-cred", "agent_name": "y"}}}
+        });
+        super::strip_assignee_credential_ids(&mut page);
+        let text = page.to_string();
+        assert!(!text.contains("credential_id"), "{text}");
+        assert_eq!(
+            page["threads"][0]["assignee"]["agent"]["agent_name"],
+            json!("helper")
+        );
+        assert_eq!(
+            page["threads"][0]["assignee"]["agent"]["credential_type"],
+            json!("oauth")
+        );
+        assert_eq!(page["threads"][0]["assignee"]["name"], json!("Pat"));
+        assert_eq!(
+            page["threads"][0]["replies"][0]["assignee"]["agent"]["agent_name"],
+            json!("x")
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_list_output_omits_assignee_credential_ids() {
+        let (router, _seen) = capturing_router(json!({
+            "result": true,
+            "threads": [{"id": "c1", "assignee": {"user_id": "u1",
+                "agent": {"agent_name": "helper", "credential_type": "oauth", "credential_id": "secret-cred"}},
+                "replies": [{"id": "c2", "assignee": {"user_id": "u2",
+                    "agent": {"agent_name": "x", "credential_id": "nested-cred"}}}]}]
+        }))
+        .await;
+        let res = router
+            .call_tool(
+                "comment",
+                comment_args(
+                    "list",
+                    &[node_pairs(), vec![("group", json!("threads"))]].concat(),
+                ),
+            )
+            .await
+            .expect("call_tool ok");
+        let text = result_to_string(&res);
+        assert!(
+            !text.contains("secret-cred") && !text.contains("nested-cred"),
+            "{text}"
+        );
+        assert!(text.contains("helper"), "{text}");
+    }
+
+    /// The strip is in the shared success path, so a non-comment tool that
+    /// returns comment rows (a note read with suggestions) strips too.
+    #[tokio::test]
+    async fn non_comment_tool_output_omits_assignee_credential_ids() {
+        let (router, _seen) = capturing_router(json!({
+            "result": true,
+            "content": "x",
+            "suggestions": [{"id": "c1", "assignee": {"user_id": "u1",
+                "agent": {"agent_name": "helper", "credential_id": "secret-cred"}}}]
+        }))
+        .await;
+        let mut args = Map::new();
+        args.insert("action".to_owned(), json!("read-note"));
+        args.insert("workspace_id".to_owned(), json!("1000000000000000001"));
+        args.insert("node_id".to_owned(), json!("n1"));
+        args.insert("include_suggestions".to_owned(), json!(true));
+        let res = router
+            .call_tool("workspace", args)
+            .await
+            .expect("call_tool ok");
+        let text = result_to_string(&res);
+        assert!(!text.contains("secret-cred"), "{text}");
+        assert!(text.contains("helper"), "{text}");
+    }
+
+    /// MCP never retries an accept, even when the server marks the refusal
+    /// retryable: exactly one request, and the refusal comes back as an error
+    /// with its hint.
+    #[tokio::test]
+    async fn mcp_accept_is_sent_once_even_when_retryable() {
+        for (status, params) in [
+            (
+                409,
+                json!({"reason": "suggestion_needs_editor", "editor_reason": "room_busy", "retryable": true}),
+            ),
+            (
+                503,
+                json!({"reason": "suggestion_apply_unknown", "retryable": true}),
+            ),
+        ] {
+            let (router, seen) = capturing_router_with_status(
+                status,
+                json!({"result": false, "error": {"code": 170_001, "text": "refused", "params": params}}),
+            )
+            .await;
+            let res = router
+                .call_tool(
+                    "comment",
+                    comment_args("suggestion-accept", &[("comment_id", json!("c1"))]),
+                )
+                .await
+                .expect("call_tool ok");
+            assert_eq!(res.is_error, Some(true), "{}", result_to_string(&res));
+            let text = result_to_string(&res);
+            let hint = if status == 409 {
+                fastio_cli::error::HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE
+            } else {
+                fastio_cli::error::HINT_SUGGESTION_APPLY_UNKNOWN
+            };
+            // The hint travels inside a JSON string, so compare on a prefix
+            // free of characters JSON would escape.
+            let probe: String = hint.chars().take_while(|c| *c != '`').collect();
+            assert!(text.contains(probe.trim_end()), "{status}: {text}");
+            let seen = seen.lock().map(|s| s.clone()).unwrap_or_default();
+            assert_eq!(seen.len(), 1, "{status}: MCP must not retry");
+            assert_eq!(seen[0].0, "POST /comments/c1/suggestion/accept/");
+            assert_eq!(
+                serde_json::from_str::<Value>(&seen[0].1).unwrap_or(Value::Null),
+                json!({"mode": "headless"})
+            );
+        }
+    }
+
+    /// Dispatch for the remaining suggestion actions: method, path, one
+    /// request each, and the error mapping on a refusal.
+    #[tokio::test]
+    async fn mcp_suggestion_list_edit_withdraw_reject_dispatch() {
+        // (call, method, path prefix, expected JSON body)
+        type Case = (
+            Map<String, Value>,
+            &'static str,
+            &'static str,
+            Option<Value>,
+        );
+        let ok = json!({"result": true, "comment": {"id": "c1"}, "comments": []});
+        let cases: Vec<Case> = vec![
+            (
+                comment_args("suggestion-list", &node_pairs()),
+                "GET",
+                "/comments/workspace/1000000000000000001/nabcdefghijklmnopqrstuvwxyz12/?",
+                None,
+            ),
+            (
+                comment_args(
+                    "suggestion-list",
+                    &[
+                        ("entity_type", json!("workspace")),
+                        ("entity_id", json!("1000000000000000001")),
+                    ],
+                ),
+                "GET",
+                "/comments/workspace/1000000000000000001/?",
+                None,
+            ),
+            (
+                comment_args(
+                    "suggestion-edit",
+                    &[
+                        ("comment_id", json!("c1")),
+                        ("replacement", json!("new")),
+                        ("note", json!("why")),
+                    ],
+                ),
+                "POST",
+                "/comments/c1/update/",
+                Some(json!({"suggestion": {"op": "replace", "replacement": "new"}, "body": "why"})),
+            ),
+            (
+                comment_args("suggestion-withdraw", &[("comment_id", json!("c1"))]),
+                "POST",
+                "/comments/c1/suggestion/withdraw/",
+                Some(json!({})),
+            ),
+            (
+                comment_args("suggestion-reject", &[("comment_id", json!("c1"))]),
+                "POST",
+                "/comments/c1/suggestion/reject/",
+                Some(json!({})),
+            ),
+        ];
+        for (args, method, path, body) in cases {
+            let action = args.get("action").cloned();
+            let (router, seen) = capturing_router(ok.clone()).await;
+            let res = router
+                .call_tool("comment", args.clone())
+                .await
+                .expect("call_tool ok");
+            assert_ne!(
+                res.is_error,
+                Some(true),
+                "{action:?}: {}",
+                result_to_string(&res)
+            );
+            let seen = seen.lock().map(|s| s.clone()).unwrap_or_default();
+            assert_eq!(seen.len(), 1, "{action:?}: one request");
+            assert!(
+                seen[0].0.starts_with(&format!("{method} {path}")),
+                "{action:?}: {}",
+                seen[0].0
+            );
+            if path.ends_with('?') {
+                assert!(seen[0].0.contains("kind=suggestion"), "{}", seen[0].0);
+            }
+            if let Some(body) = body {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&seen[0].1).unwrap_or(Value::Null),
+                    body
+                );
+            }
+
+            // The same call against a refusal maps to an error with its hint.
+            let (router, seen) = capturing_router_with_status(
+                409,
+                json!({"result": false, "error": {"code": 170_001, "text": "refused",
+                    "params": {"reason": "suggestion_not_pending"}}}),
+            )
+            .await;
+            let res = router
+                .call_tool("comment", args)
+                .await
+                .expect("call_tool ok");
+            assert_eq!(res.is_error, Some(true), "{action:?}");
+            let text = result_to_string(&res);
+            assert!(text.contains("no longer pending"), "{action:?}: {text}");
+            assert_eq!(
+                seen.lock().map(|s| s.len()).unwrap_or_default(),
+                1,
+                "{action:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_note_include_suggestions_reaches_the_query() {
+        let (router, seen) =
+            capturing_router(json!({"result": true, "content": "x", "suggestions": []})).await;
+        let mut args = Map::new();
+        args.insert("action".to_owned(), json!("read-note"));
+        args.insert("workspace_id".to_owned(), json!("1000000000000000001"));
+        args.insert("node_id".to_owned(), json!("n1"));
+        args.insert("include_suggestions".to_owned(), json!(true));
+        let res = router
+            .call_tool("workspace", args)
+            .await
+            .expect("call_tool ok");
+        assert_ne!(res.is_error, Some(true), "{}", result_to_string(&res));
+        let seen = seen.lock().map(|s| s.clone()).unwrap_or_default();
+        assert!(
+            seen[0].0.contains("include_suggestions=true"),
+            "{}",
+            seen[0].0
+        );
+    }
+
+    // ─── workspace export-note / export-status ───────────────────────────────
+
+    const EXPORT_NODE: &str = "nabcd-efghi-jklmn-opqrs-tuvwx-yz12";
+
+    fn export_args(action: &str, pairs: &[(&str, Value)]) -> Map<String, Value> {
+        let mut args = Map::new();
+        args.insert("action".to_owned(), json!(action));
+        for (k, v) in pairs {
+            args.insert((*k).to_owned(), v.clone());
+        }
+        args
+    }
+
+    fn note_pairs(format: &str) -> Vec<(&'static str, Value)> {
+        vec![
+            ("workspace_id", json!("1000000000000000001")),
+            ("node_id", json!(EXPORT_NODE)),
+            ("format", json!(format)),
+        ]
+    }
+
+    fn seen_requests(seen: &Arc<std::sync::Mutex<Vec<(String, String)>>>) -> Vec<(String, String)> {
+        seen.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// An `md` export finishes in the start response: one request, the
+    /// saved copy's node id and the report come straight back.
+    #[tokio::test]
+    async fn export_note_md_returns_the_saved_copy_from_the_start() {
+        let (router, seen) = capturing_router(json!({"result": true, "export": {
+            "id": "e1", "status": "succeeded", "output": {"node_id": "nsaved"},
+            "report": {"pages": null, "orphaned_threads": [{"id": "c7", "reason": "stale"}]}
+        }}))
+        .await;
+        let res = router
+            .call_tool("workspace", export_args("export-note", &note_pairs("md")))
+            .await
+            .expect("call_tool ok");
+        let text = result_to_string(&res);
+        assert_ne!(res.is_error, Some(true), "{text}");
+        for want in ["e1", "nsaved", "c7", "stale"] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        let seen = seen_requests(&seen);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(
+            seen[0].0,
+            "POST /workspace/1000000000000000001/storage/nabcdefghijklmnopqrstuvwxyz12/export/"
+        );
+        let body: Value = serde_json::from_str(&seen[0].1).expect("JSON body");
+        assert_eq!(body["format"], "md");
+        assert_eq!(body["destination"], "workspace");
+        assert_eq!(body["suggestions"], "none");
+        assert_eq!(body["comments"], "none");
+        let key = body["idempotency_key"].as_str().expect("key");
+        assert_eq!(key.len(), 36, "{key}");
+    }
+
+    /// A job still running when the wait runs out comes back with its id and
+    /// a next step; nothing is started twice.
+    #[tokio::test]
+    async fn export_note_returns_the_id_of_a_pending_job() {
+        let (router, seen) =
+            capturing_router(json!({"result": true, "export": {"id": "e2", "status": "queued"}}))
+                .await;
+        let client = router.state.client().read().await;
+        let res = super::export_note(
+            &client,
+            &export_args("export-note", &note_pairs("pdf")),
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let text = result_to_string(&res);
+        assert_ne!(res.is_error, Some(true), "{text}");
+        assert!(
+            text.contains("e2") && text.contains("export-status"),
+            "{text}"
+        );
+        assert_eq!(seen_requests(&seen).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_note_refuses_bad_options_before_any_request() {
+        let (router, seen) = capturing_router(json!({"result": true})).await;
+        let mut tracked = note_pairs("pdf");
+        tracked.push(("suggestions", json!("native")));
+        let mut parent = note_pairs("docx");
+        parent.push(("destination", json!("download")));
+        parent.push(("parent_id", json!("f1")));
+        let mut comments = note_pairs("docx");
+        comments.push(("comments", json!("inline")));
+        let mut resolved = note_pairs("docx");
+        resolved.push(("include_resolved", json!(42)));
+        for (label, pairs) in [
+            ("tracked changes on pdf", tracked),
+            ("parent with download", parent),
+            ("unknown comments mode", comments),
+            ("non-boolean include_resolved", resolved),
+            ("unknown format", note_pairs("rtf")),
+        ] {
+            let res = router
+                .call_tool("workspace", export_args("export-note", &pairs))
+                .await
+                .expect("call_tool ok");
+            assert_eq!(
+                res.is_error,
+                Some(true),
+                "{label}: {}",
+                result_to_string(&res)
+            );
+        }
+        assert!(seen_requests(&seen).is_empty());
+    }
+
+    /// A failed job is reported with its hint, and checking it never starts
+    /// another export.
+    #[tokio::test]
+    async fn export_status_reports_a_failure_with_its_hint() {
+        let (router, seen) = capturing_router(json!({"result": true, "export": {
+            "id": "e3", "status": "failed",
+            "error": {"reason": "export_too_large", "retryable": false,
+                      "params": {"comments_droppable": true}}
+        }}))
+        .await;
+        let res = router
+            .call_tool(
+                "workspace",
+                export_args("export-status", &[("export_id", json!("e3"))]),
+            )
+            .await
+            .expect("call_tool ok");
+        let text = result_to_string(&res);
+        assert_eq!(res.is_error, Some(true), "a failed job is an error: {text}");
+        assert!(text.contains("export_too_large"), "{text}");
+        assert!(text.contains("--comments none"), "{text}");
+        let seen = seen_requests(&seen);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "GET /exports/e3/");
+    }
+
+    /// `export-note` whose job has already failed (the start replayed a failed
+    /// export) returns an error result that still carries the record and hint.
+    #[tokio::test]
+    async fn export_note_returns_a_failed_job_as_an_error() {
+        let (router, seen) = capturing_router(json!({"result": true, "export": {
+            "id": "e7", "status": "failed",
+            "error": {"reason": "export_render_failed", "retryable": false},
+            "report": {"orphaned_threads": []}
+        }}))
+        .await;
+        let res = router
+            .call_tool("workspace", export_args("export-note", &note_pairs("pdf")))
+            .await
+            .expect("call_tool ok");
+        let text = result_to_string(&res);
+        assert_eq!(res.is_error, Some(true), "{text}");
+        assert!(
+            text.contains("e7") && text.contains("export_render_failed"),
+            "{text}"
+        );
+        assert!(text.contains("could not be rendered"), "{text}");
+        assert_eq!(seen_requests(&seen).len(), 1);
+    }
+
+    /// Serve `replies` in order, one per connection (the last repeats), and
+    /// record each request line.
+    async fn sequenced_client(
+        replies: Vec<(u16, Value)>,
+    ) -> (
+        fastio_cli::client::ApiClient,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let mut next = 0usize;
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                let mut header_end = None;
+                while header_end.is_none() {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                    header_end = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                }
+                let Some(header_end) = header_end else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&raw[..header_end]).to_string();
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while raw.len() < header_end + length {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => raw.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
+                let line = format!(
+                    "{} {}",
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default()
+                );
+                if let Ok(mut s) = sink.lock() {
+                    s.push(line);
+                }
+                let (status, body) = replies[next.min(replies.len() - 1)].clone();
+                next += 1;
+                let body = body.to_string();
+                let header = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                let _ = sock.write_all(body.as_bytes()).await;
+            }
+        });
+        let client = fastio_cli::client::ApiClient::new_without_proxy(
+            &format!("http://{addr}"),
+            Some("tok".to_owned()),
+        )
+        .expect("client builds");
+        (client, seen)
+    }
+
+    /// The start succeeded but checking the job failed: the error carries the
+    /// export id and says to call export-status, never export-note again.
+    #[tokio::test]
+    async fn export_note_keeps_the_export_id_when_the_check_fails() {
+        let (client, seen) = sequenced_client(vec![
+            (
+                202,
+                json!({"result": true, "export": {"id": "e8", "status": "queued"}}),
+            ),
+            (
+                404,
+                json!({"result": false, "error": {"code": 1, "text": "not found"}}),
+            ),
+        ])
+        .await;
+        let res = super::export_note(
+            &client,
+            &export_args("export-note", &note_pairs("pdf")),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        let text = result_to_string(&res);
+        assert_eq!(res.is_error, Some(true), "{text}");
+        for want in ["e8", "queued", "export-status", "not found"] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        // The recovery hint survives alongside the error text.
+        assert!(
+            text.contains(fastio_cli::error::HINT_EXPORT_NOT_FOUND),
+            "{text}"
+        );
+        let seen = seen.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(
+            seen.iter().filter(|l| l.starts_with("POST")).count(),
+            1,
+            "{seen:?}"
+        );
+        assert_eq!(seen.len(), 2, "{seen:?}");
+    }
+
+    /// A finished download-destination export is never handed out as a URL,
+    /// and the session credential never appears.
+    #[tokio::test]
+    async fn export_status_hides_the_download_url_and_the_credential() {
+        let (router, _seen) = capturing_router(json!({"result": true, "export": {
+            "id": "e4", "status": "succeeded",
+            "output": {"download_url": "https://files.example/e4?sig=abc", "expires": "2030-01-01"}
+        }}))
+        .await;
+        let res = router
+            .call_tool(
+                "workspace",
+                export_args("export-status", &[("export_id", json!("e4"))]),
+            )
+            .await
+            .expect("call_tool ok");
+        let text = result_to_string(&res);
+        assert_ne!(res.is_error, Some(true), "{text}");
+        assert!(
+            !text.contains("download_url") && !text.contains("sig=abc"),
+            "{text}"
+        );
+        assert!(!text.contains("test-token"), "{text}");
+        assert!(text.contains("output_path"), "{text}");
+    }
+
+    /// With `output_path`, a JSON body in place of the file is refused and
+    /// nothing is written.
+    #[tokio::test]
+    async fn export_status_never_saves_a_json_body_as_the_file() {
+        let (router, seen) = capturing_router(json!({"result": true, "export": {
+            "id": "e5", "status": "succeeded", "output": {"expires": "2030-01-01"}
+        }}))
+        .await;
+        let path = std::env::temp_dir().join(format!(
+            "fastio-mcp-export-{}-{}.pdf",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let res = router
+            .call_tool(
+                "workspace",
+                export_args(
+                    "export-status",
+                    &[
+                        ("export_id", json!("e5")),
+                        ("output_path", json!(path.display().to_string())),
+                    ],
+                ),
+            )
+            .await
+            .expect("call_tool ok");
+        assert_eq!(res.is_error, Some(true), "{}", result_to_string(&res));
+        assert!(!path.exists());
+        let seen = seen_requests(&seen);
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].0, "GET /exports/e5/download/");
+    }
+
+    fn scratch_path(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "fastio-mcp-export-{}-{name}.pdf",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A download that fails after `succeeded` keeps the report and the id,
+    /// is an error, and says to call export-status again.
+    #[tokio::test]
+    async fn export_status_keeps_the_report_when_the_download_fails() {
+        let (client, seen) = sequenced_client(vec![
+            (
+                200,
+                json!({"result": true, "export": {"id": "e9", "status": "succeeded",
+                    "output": {"expires": "2030-01-01"},
+                    "report": {"orphaned_threads": [{"id": "c4", "reason": "overlap"}]}}}),
+            ),
+            (
+                404,
+                json!({"result": false, "error": {"code": 1, "text": "not found"}}),
+            ),
+        ])
+        .await;
+        let path = scratch_path("download-fails");
+        let res = super::export_status_check(
+            &client,
+            &export_args(
+                "export-status",
+                &[
+                    ("export_id", json!("e9")),
+                    ("output_path", json!(path.display().to_string())),
+                ],
+            ),
+        )
+        .await;
+        let text = result_to_string(&res);
+        assert_eq!(res.is_error, Some(true), "{text}");
+        for want in [
+            "e9",
+            "succeeded",
+            "c4",
+            "overlap",
+            "download_error",
+            "export-status",
+        ] {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        assert!(
+            text.contains(fastio_cli::error::HINT_EXPORT_NOT_FOUND),
+            "{text}"
+        );
+        assert!(!path.exists());
+        assert_eq!(seen.lock().map(|s| s.len()).unwrap_or_default(), 2);
+    }
+
+    /// An `output_path` that is not written says why, and nothing is fetched
+    /// beyond the status.
+    #[tokio::test]
+    async fn export_status_says_why_output_path_was_not_used() {
+        for (record, why, failed) in [
+            (
+                json!({"id": "e10", "status": "queued"}),
+                "still queued",
+                false,
+            ),
+            (
+                json!({"id": "e10", "status": "succeeded", "output": {"node_id": "ncopy"}}),
+                "saved in the workspace as node ncopy",
+                false,
+            ),
+            (
+                json!({"id": "e10", "status": "failed",
+                    "error": {"reason": "export_timeout", "retryable": true}}),
+                "the export failed",
+                true,
+            ),
+        ] {
+            let (router, seen) = capturing_router(json!({"result": true, "export": record})).await;
+            let path = scratch_path("ignored");
+            let res = router
+                .call_tool(
+                    "workspace",
+                    export_args(
+                        "export-status",
+                        &[
+                            ("export_id", json!("e10")),
+                            ("output_path", json!(path.display().to_string())),
+                        ],
+                    ),
+                )
+                .await
+                .expect("call_tool ok");
+            let text = result_to_string(&res);
+            assert!(text.contains("output_path was not used"), "{why}: {text}");
+            assert!(text.contains(why), "{why}: {text}");
+            assert_eq!(res.is_error == Some(true), failed, "{why}: {text}");
+            assert!(!path.exists());
+            assert_eq!(seen_requests(&seen).len(), 1, "{why}");
+        }
+    }
+
+    #[tokio::test]
+    async fn export_status_refuses_an_unwritable_output_path_before_any_request() {
+        let (router, seen) = capturing_router(json!({"result": true})).await;
+        let missing = std::env::temp_dir()
+            .join("fastio-mcp-export-missing-dir")
+            .join("plan.pdf");
+        for path in [missing, std::env::temp_dir()] {
+            let res = router
+                .call_tool(
+                    "workspace",
+                    export_args(
+                        "export-status",
+                        &[
+                            ("export_id", json!("e11")),
+                            ("output_path", json!(path.display().to_string())),
+                        ],
+                    ),
+                )
+                .await
+                .expect("call_tool ok");
+            assert_eq!(res.is_error, Some(true), "{}", result_to_string(&res));
+        }
+        assert!(seen_requests(&seen).is_empty());
+    }
+
+    #[tokio::test]
+    async fn export_status_refuses_an_empty_or_nul_output_path_before_any_request() {
+        let (router, seen) = capturing_router(json!({"result": true})).await;
+        for path in ["", "   ", "plan\0.pdf"] {
+            let res = router
+                .call_tool(
+                    "workspace",
+                    export_args(
+                        "export-status",
+                        &[("export_id", json!("e11")), ("output_path", json!(path))],
+                    ),
+                )
+                .await
+                .expect("call_tool ok");
+            let text = result_to_string(&res);
+            assert_eq!(res.is_error, Some(true), "{path:?}: {text}");
+            assert!(text.contains("non-empty file path"), "{path:?}: {text}");
+        }
+        assert!(seen_requests(&seen).is_empty());
     }
 }

@@ -408,6 +408,150 @@ pub const HINT_SA_DISABLED: &str = "This service account is disabled, so it cann
 pub const HINT_SA_WORKSPACE_UNAVAILABLE: &str = "The workspace was closed or is closing, so no service account was created. \
      Check it with `fastio workspace info <id>`.";
 
+/// Comments — a `404` from a comment-thread or suggestion route. The route is
+/// newer than some deployments, and an unknown route and an unknown comment
+/// look alike from here, so the hint names both possibilities.
+pub const HINT_COMMENT_ROUTE_NOT_FOUND: &str = "Not found. Check the comment id with `fastio comment info <id>`; \
+     if it resolves, the server does not support this yet.";
+
+/// Comments — `comment_not_root`: thread state lives on the root comment.
+pub const HINT_COMMENT_NOT_ROOT: &str = "Thread state (resolve, reopen, assign) lives on the thread's root comment. \
+     Run the command against the root: `fastio comment info <id>` shows a reply's `parent_id`.";
+
+/// Comments — `comment_is_suggestion`: suggestion threads change state through
+/// the suggestion commands, and a decided suggestion is never reopened.
+pub const HINT_COMMENT_IS_SUGGESTION: &str = "This thread is a suggested edit. Change its state with `fastio suggestion accept`, \
+     `reject` or `withdraw`; a decided suggestion cannot be reopened.";
+
+/// Comments — `state_version_conflict`: the `--if-state-version` precondition
+/// no longer holds.
+pub const HINT_COMMENT_STATE_VERSION: &str = "The thread changed since the state version you supplied. \
+     Re-read it with `fastio comment info <id>` and decide again before retrying.";
+
+/// Comments — `assignee_no_access`.
+pub const HINT_COMMENT_ASSIGNEE_NO_ACCESS: &str = "That person cannot see this file. \
+     Give them access first, or assign someone who already has it.";
+
+/// Comments — `409` / `comment_thread_limit_reached`. Re-reading cannot help,
+/// so this is deliberately not "re-read and retry" advice.
+pub const HINT_COMMENT_THREAD_LIMIT: &str = "This file has reached the thread limit for its plan \
+     (`fastio comment list` shows `limits`). Delete threads you no longer need, or upgrade the plan. \
+     Replies are not limited.";
+
+/// Comments — `503` / `comment_thread_limit_unavailable`: the limit could not
+/// be checked, so nothing was created. Not retried automatically.
+pub const HINT_COMMENT_THREAD_LIMIT_UNAVAILABLE: &str = "The server could not check the thread limit, so nothing was created. \
+     Try again shortly.";
+
+/// Quote anchors — `anchor_invalid`.
+pub const HINT_ANCHOR_INVALID: &str = "The quote anchor was rejected as malformed. A document anchor carries `type` \
+     \"document\", `exact`, `prefix` and `suffix` (empty strings are allowed). Use `--quote` and let the CLI build it.";
+
+/// Quote anchors — `anchor_too_large`.
+pub const HINT_ANCHOR_TOO_LARGE: &str = "The quote anchor is too large: `exact` may be at most 500 characters, \
+     `prefix` and `suffix` at most 100 each, and the whole anchor at most 2048 bytes. Quote a shorter passage.";
+
+/// Quote anchors — `anchor_ambiguous`.
+pub const HINT_ANCHOR_AMBIGUOUS: &str = "The quoted text appears more than once in the note. Add more context with \
+     `--prefix` / `--suffix`, or pick one match with `--occurrence N`.";
+
+/// Suggestions — `suggestion_invalid`.
+pub const HINT_SUGGESTION_INVALID: &str = "The suggestion was rejected. A replacement needs at least one non-whitespace \
+     character and must differ from the quoted text, the quote must stay on one line, and a replacement is at most \
+     8192 characters. Use `--delete` to remove the quoted text instead.";
+
+/// Suggestions — `409` / `suggestion_not_pending`.
+pub const HINT_SUGGESTION_NOT_PENDING: &str = "The suggestion is no longer pending: it may already be decided, or \
+     someone may be accepting it right now. Check its state with `fastio suggestion list`.";
+
+/// Suggestions — `409` / `suggestion_stale`: nothing was applied.
+pub const HINT_SUGGESTION_STALE: &str = "The quoted text has changed since the suggestion was made, so nothing was \
+     applied. Reject the suggestion, or create a new one against the current text.";
+
+/// Suggestions — `409` / `suggestion_needs_editor` with `retryable: false`.
+pub const HINT_SUGGESTION_NEEDS_EDITOR: &str = "Open the note to accept this suggestion: it cannot be applied while \
+     the note is closed (the reason is on the `param editor_reason:` line).";
+
+/// Suggestions — `409` / `suggestion_needs_editor` with
+/// `editor_reason: prior_attempt_unknown`: an EARLIER accept's outcome is
+/// unknown, so its edit may already be in the note.
+pub const HINT_SUGGESTION_PRIOR_ATTEMPT_UNKNOWN: &str = "An earlier accept of this suggestion has an unknown outcome, \
+     so its edit may already be in the note. Re-read the note and list the suggestion's state before doing \
+     anything else; if it is still pending, open the note to accept it there.";
+
+/// Suggestions — `409` / `suggestion_needs_editor` with `retryable: true`
+/// (in the CLI, after its single automatic retry was also refused).
+pub const HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE: &str = "The note is busy right now. Try again shortly, or open \
+     the note to accept this suggestion there.";
+
+/// Suggestions — `503` / `suggestion_apply_unknown`: the edit may have landed.
+pub const HINT_SUGGESTION_APPLY_UNKNOWN: &str = "The edit may have been applied. Re-read the note and the \
+     suggestion's state (`fastio suggestion list`) before trying again; a repeat accept never applies twice.";
+
+/// Suggestions — `503` / `suggestion_apply_unavailable`.
+pub const HINT_SUGGESTION_APPLY_UNAVAILABLE: &str = "The note editing service is unavailable. Check the suggestion's \
+     state with `fastio suggestion list` before re-running accept.";
+
+/// Suggestions — `403` / `suggestion_accept_forbidden`.
+pub const HINT_SUGGESTION_ACCEPT_FORBIDDEN: &str = "You cannot accept this suggestion: accepting needs edit rights on \
+     the note. Ask someone who can edit it.";
+
+/// Export — a reasonless `404` from an export route. An export is readable
+/// only by the person who started it and its file is kept for a limited time,
+/// and an unknown route looks the same from here.
+pub const HINT_EXPORT_NOT_FOUND: &str = "Not found. Check the id: an export can only be read by the \
+     person who started it, and its file expires after 24 hours. If the id is right, the server does \
+     not support exports yet.";
+
+/// Export — `export_unsupported_format`.
+pub const HINT_EXPORT_UNSUPPORTED_FORMAT: &str = "That format cannot be exported. Use one of pdf, docx, \
+     odt, html, txt or md; tracked changes need docx or odt.";
+
+/// Export — `export_not_a_note`.
+pub const HINT_EXPORT_NOT_A_NOTE: &str = "Only notes can be exported. Check the node with \
+     `fastio files info --workspace <workspace_id> <node_id>`.";
+
+/// Export — `export_version_not_found`.
+pub const HINT_EXPORT_VERSION_NOT_FOUND: &str = "That version of the note was not found. List them with \
+     `fastio files versions --workspace <workspace_id> <node_id>`, or omit `--version` to export the \
+     current text.";
+
+/// Export — `export_too_large` when dropping comments would make it fit.
+pub const HINT_EXPORT_TOO_LARGE_DROP_COMMENTS: &str = "The export is too large with its comments. \
+     Run it again with `--comments none` and without `--tracked-changes`.";
+
+/// Export — `export_too_large` when dropping comments would not help.
+pub const HINT_EXPORT_TOO_LARGE: &str = "The note is too large to export.";
+
+/// Export — `export_converter_unavailable` (retryable).
+pub const HINT_EXPORT_CONVERTER_UNAVAILABLE: &str = "The export service is unavailable right now. \
+     Run the export again in a little while.";
+
+/// Export — `export_timeout` (retryable).
+pub const HINT_EXPORT_TIMEOUT: &str = "The export took too long to render. Run it again in a little \
+     while; a format without comments or tracked changes renders faster.";
+
+/// Export — `export_render_failed`.
+pub const HINT_EXPORT_RENDER_FAILED: &str = "The note could not be rendered in that format. Try \
+     another format, or export without comments.";
+
+/// Export — `export_destination_denied`.
+pub const HINT_EXPORT_DESTINATION_DENIED: &str = "You cannot save into that folder. Pick a folder you \
+     can write to with `--folder`, or download the file with `--output`.";
+
+/// Export — `export_rate_limited`.
+pub const HINT_EXPORT_RATE_LIMITED: &str = "Too many exports at once. Wait (see `retry_after`) and \
+     run it again.";
+
+/// Export — `export_download_expired`.
+pub const HINT_EXPORT_DOWNLOAD_EXPIRED: &str =
+    "The exported file has expired. Run the export again.";
+
+/// Export — `409` / `export_idempotency_conflict`: the same key arrived with
+/// different options.
+pub const HINT_EXPORT_IDEMPOTENCY_CONFLICT: &str = "An export with this request key was already started \
+     with different options. Run the command again; each run uses a new key.";
+
 /// Map a server `reason` to its recovery hint.
 ///
 /// The single place that knows the reason vocabulary. Unknown reasons return
@@ -445,6 +589,32 @@ fn reason_hint(reason: &str, http_status: u16) -> Option<&'static str> {
         ("key_limit", 409) => Some(HINT_SA_KEY_LIMIT),
         ("service_account_disabled", 409) => Some(HINT_SA_DISABLED),
         ("workspace_unavailable", 409) => Some(HINT_SA_WORKSPACE_UNAVAILABLE),
+        ("comment_not_root", _) => Some(HINT_COMMENT_NOT_ROOT),
+        ("comment_is_suggestion", _) => Some(HINT_COMMENT_IS_SUGGESTION),
+        ("state_version_conflict", 409) => Some(HINT_COMMENT_STATE_VERSION),
+        ("assignee_no_access", _) => Some(HINT_COMMENT_ASSIGNEE_NO_ACCESS),
+        ("comment_thread_limit_reached", _) => Some(HINT_COMMENT_THREAD_LIMIT),
+        ("comment_thread_limit_unavailable", _) => Some(HINT_COMMENT_THREAD_LIMIT_UNAVAILABLE),
+        ("anchor_invalid", _) => Some(HINT_ANCHOR_INVALID),
+        ("anchor_too_large", _) => Some(HINT_ANCHOR_TOO_LARGE),
+        ("anchor_ambiguous", _) => Some(HINT_ANCHOR_AMBIGUOUS),
+        ("suggestion_invalid", _) => Some(HINT_SUGGESTION_INVALID),
+        ("suggestion_not_pending", _) => Some(HINT_SUGGESTION_NOT_PENDING),
+        ("suggestion_stale", _) => Some(HINT_SUGGESTION_STALE),
+        ("suggestion_apply_unknown", _) => Some(HINT_SUGGESTION_APPLY_UNKNOWN),
+        ("suggestion_apply_unavailable", _) => Some(HINT_SUGGESTION_APPLY_UNAVAILABLE),
+        ("suggestion_accept_forbidden", _) => Some(HINT_SUGGESTION_ACCEPT_FORBIDDEN),
+        ("export_unsupported_format", _) => Some(HINT_EXPORT_UNSUPPORTED_FORMAT),
+        ("export_not_a_note", _) => Some(HINT_EXPORT_NOT_A_NOTE),
+        ("export_version_not_found", _) => Some(HINT_EXPORT_VERSION_NOT_FOUND),
+        ("export_too_large", _) => Some(HINT_EXPORT_TOO_LARGE),
+        ("export_converter_unavailable", _) => Some(HINT_EXPORT_CONVERTER_UNAVAILABLE),
+        ("export_timeout", _) => Some(HINT_EXPORT_TIMEOUT),
+        ("export_render_failed", _) => Some(HINT_EXPORT_RENDER_FAILED),
+        ("export_destination_denied", _) => Some(HINT_EXPORT_DESTINATION_DENIED),
+        ("export_rate_limited", _) => Some(HINT_EXPORT_RATE_LIMITED),
+        ("export_download_expired", _) => Some(HINT_EXPORT_DOWNLOAD_EXPIRED),
+        ("export_idempotency_conflict", _) => Some(HINT_EXPORT_IDEMPOTENCY_CONFLICT),
         _ => None,
     }
 }
@@ -1197,6 +1367,25 @@ impl ApiError {
         }
     }
 
+    /// Read a BOOLEAN value out of the OBJECT-shaped `error.params` by key.
+    ///
+    /// Object shape ONLY, like [`Self::param_str`]. A native JSON bool is
+    /// accepted, and so are the strings `"true"` / `"false"` because the
+    /// platform string-encodes some scalars. Anything else is `None`: absent
+    /// is not `false`, and a caller deciding whether to retry must treat an
+    /// unreadable flag as "do not retry".
+    #[must_use]
+    pub fn param_bool(&self, key: &str) -> Option<bool> {
+        match self.details.as_deref()?.get("params")? {
+            serde_json::Value::Object(map) => match map.get(key)? {
+                serde_json::Value::Bool(b) => Some(*b),
+                serde_json::Value::String(s) => s.parse().ok(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Whether this error says the account is CURRENTLY locked out.
     ///
     /// **One predicate, used by both [`Self::lockout_note`] and
@@ -1328,6 +1517,29 @@ impl ApiError {
         }
     }
 
+    /// The hint for a reason whose recovery depends on a second field.
+    ///
+    /// A `retryable` needs-editor refusal clears on its own, any other one
+    /// needs the note opened. A too-large export can be retried without
+    /// comments only when the server says that would fit.
+    fn param_dependent_hint(&self) -> Option<&'static str> {
+        match self.field_reason()? {
+            "suggestion_needs_editor" => Some(
+                if self.param_str("editor_reason") == Some("prior_attempt_unknown") {
+                    HINT_SUGGESTION_PRIOR_ATTEMPT_UNKNOWN
+                } else if self.param_bool("retryable") == Some(true) {
+                    HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE
+                } else {
+                    HINT_SUGGESTION_NEEDS_EDITOR
+                },
+            ),
+            "export_too_large" if self.param_bool("comments_droppable") == Some(true) => {
+                Some(HINT_EXPORT_TOO_LARGE_DROP_COMMENTS)
+            }
+            _ => None,
+        }
+    }
+
     /// Return a human-readable suggestion based on the HTTP status or error code.
     #[must_use]
     pub fn suggestion(&self) -> Option<&'static str> {
@@ -1341,6 +1553,9 @@ impl ApiError {
             .field_reason()
             .and_then(|reason| scope_refusal_hint(reason, self.param_str("credential_type")))
         {
+            return Some(hint);
+        }
+        if let Some(hint) = self.param_dependent_hint() {
             return Some(hint);
         }
         if let Some(hint) = self
@@ -3800,5 +4015,191 @@ mod tests {
                 "must name the flag: {hint}"
             );
         }
+    }
+
+    fn with_params(status: u16, params: &serde_json::Value) -> ApiError {
+        ApiError::new(170_001, None, "refused".to_owned(), status)
+            .with_details(serde_json::json!({ "params": params }))
+    }
+
+    /// The needs-editor hint depends on `retryable`, and an absent or
+    /// unreadable flag reads as NOT retryable.
+    #[test]
+    fn needs_editor_hint_follows_the_retryable_flag() {
+        use super::{HINT_SUGGESTION_NEEDS_EDITOR, HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE};
+        let reason = "suggestion_needs_editor";
+        for (retryable, want) in [
+            (
+                serde_json::json!(true),
+                HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE,
+            ),
+            (
+                serde_json::json!("true"),
+                HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE,
+            ),
+            (serde_json::json!(false), HINT_SUGGESTION_NEEDS_EDITOR),
+            (serde_json::json!(null), HINT_SUGGESTION_NEEDS_EDITOR),
+            (serde_json::json!(1), HINT_SUGGESTION_NEEDS_EDITOR),
+        ] {
+            let err = with_params(
+                409,
+                &serde_json::json!({ "reason": reason, "retryable": retryable }),
+            );
+            assert_eq!(err.suggestion(), Some(want), "retryable={retryable}");
+        }
+        let absent = with_params(409, &serde_json::json!({ "reason": reason }));
+        assert_eq!(absent.suggestion(), Some(HINT_SUGGESTION_NEEDS_EDITOR));
+        assert_eq!(absent.param_bool("retryable"), None);
+    }
+
+    /// `prior_attempt_unknown` means an EARLIER accept may have landed: the
+    /// hint must not claim nothing was applied, and must say to re-read.
+    #[test]
+    fn prior_attempt_unknown_hint_says_to_re_read() {
+        use super::{
+            HINT_SUGGESTION_NEEDS_EDITOR, HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE,
+            HINT_SUGGESTION_PRIOR_ATTEMPT_UNKNOWN,
+        };
+        let err = with_params(
+            409,
+            &serde_json::json!({
+                "reason": "suggestion_needs_editor",
+                "editor_reason": "prior_attempt_unknown",
+                "retryable": false
+            }),
+        );
+        assert_eq!(
+            err.suggestion(),
+            Some(HINT_SUGGESTION_PRIOR_ATTEMPT_UNKNOWN)
+        );
+        assert!(HINT_SUGGESTION_PRIOR_ATTEMPT_UNKNOWN.contains("Re-read"));
+        for hint in [
+            HINT_SUGGESTION_NEEDS_EDITOR,
+            HINT_SUGGESTION_NEEDS_EDITOR_RETRYABLE,
+            HINT_SUGGESTION_PRIOR_ATTEMPT_UNKNOWN,
+        ] {
+            assert!(
+                !hint.to_lowercase().contains("nothing was applied"),
+                "{hint}"
+            );
+        }
+    }
+
+    /// Every comment-thread and suggestion reason has its own hint, and none
+    /// tells the caller to re-read and retry a cap or a stale quote.
+    #[test]
+    fn comment_and_suggestion_reasons_have_hints() {
+        use super::{
+            HINT_ANCHOR_AMBIGUOUS, HINT_ANCHOR_INVALID, HINT_ANCHOR_TOO_LARGE,
+            HINT_COMMENT_ASSIGNEE_NO_ACCESS, HINT_COMMENT_IS_SUGGESTION, HINT_COMMENT_NOT_ROOT,
+            HINT_COMMENT_STATE_VERSION, HINT_COMMENT_THREAD_LIMIT,
+            HINT_COMMENT_THREAD_LIMIT_UNAVAILABLE, HINT_SUGGESTION_ACCEPT_FORBIDDEN,
+            HINT_SUGGESTION_APPLY_UNAVAILABLE, HINT_SUGGESTION_APPLY_UNKNOWN,
+            HINT_SUGGESTION_INVALID, HINT_SUGGESTION_NOT_PENDING, HINT_SUGGESTION_STALE,
+        };
+        for (status, reason, want) in [
+            (409, "comment_not_root", HINT_COMMENT_NOT_ROOT),
+            (409, "comment_is_suggestion", HINT_COMMENT_IS_SUGGESTION),
+            (409, "state_version_conflict", HINT_COMMENT_STATE_VERSION),
+            (403, "assignee_no_access", HINT_COMMENT_ASSIGNEE_NO_ACCESS),
+            (
+                409,
+                "comment_thread_limit_reached",
+                HINT_COMMENT_THREAD_LIMIT,
+            ),
+            (
+                503,
+                "comment_thread_limit_unavailable",
+                HINT_COMMENT_THREAD_LIMIT_UNAVAILABLE,
+            ),
+            (400, "anchor_invalid", HINT_ANCHOR_INVALID),
+            (400, "anchor_too_large", HINT_ANCHOR_TOO_LARGE),
+            (409, "anchor_ambiguous", HINT_ANCHOR_AMBIGUOUS),
+            (400, "suggestion_invalid", HINT_SUGGESTION_INVALID),
+            (409, "suggestion_not_pending", HINT_SUGGESTION_NOT_PENDING),
+            (409, "suggestion_stale", HINT_SUGGESTION_STALE),
+            (
+                503,
+                "suggestion_apply_unknown",
+                HINT_SUGGESTION_APPLY_UNKNOWN,
+            ),
+            (
+                503,
+                "suggestion_apply_unavailable",
+                HINT_SUGGESTION_APPLY_UNAVAILABLE,
+            ),
+            (
+                403,
+                "suggestion_accept_forbidden",
+                HINT_SUGGESTION_ACCEPT_FORBIDDEN,
+            ),
+        ] {
+            let err = with_params(status, &serde_json::json!({ "reason": reason }));
+            assert_eq!(err.suggestion(), Some(want), "{reason}");
+        }
+        assert!(!HINT_COMMENT_THREAD_LIMIT.to_lowercase().contains("retry"));
+        assert!(!HINT_SUGGESTION_STALE.to_lowercase().contains("retry"));
+    }
+
+    /// Every export reason has its own hint, and a too-large export suggests
+    /// dropping comments only when the server says that would fit.
+    #[test]
+    fn export_reasons_have_hints() {
+        use super::{
+            HINT_EXPORT_CONVERTER_UNAVAILABLE, HINT_EXPORT_DESTINATION_DENIED,
+            HINT_EXPORT_DOWNLOAD_EXPIRED, HINT_EXPORT_IDEMPOTENCY_CONFLICT, HINT_EXPORT_NOT_A_NOTE,
+            HINT_EXPORT_RATE_LIMITED, HINT_EXPORT_RENDER_FAILED, HINT_EXPORT_TIMEOUT,
+            HINT_EXPORT_TOO_LARGE, HINT_EXPORT_TOO_LARGE_DROP_COMMENTS,
+            HINT_EXPORT_UNSUPPORTED_FORMAT, HINT_EXPORT_VERSION_NOT_FOUND,
+        };
+        for (status, reason, want) in [
+            (
+                400,
+                "export_unsupported_format",
+                HINT_EXPORT_UNSUPPORTED_FORMAT,
+            ),
+            (400, "export_not_a_note", HINT_EXPORT_NOT_A_NOTE),
+            (
+                404,
+                "export_version_not_found",
+                HINT_EXPORT_VERSION_NOT_FOUND,
+            ),
+            (413, "export_too_large", HINT_EXPORT_TOO_LARGE),
+            (
+                503,
+                "export_converter_unavailable",
+                HINT_EXPORT_CONVERTER_UNAVAILABLE,
+            ),
+            (200, "export_timeout", HINT_EXPORT_TIMEOUT),
+            (200, "export_render_failed", HINT_EXPORT_RENDER_FAILED),
+            (
+                403,
+                "export_destination_denied",
+                HINT_EXPORT_DESTINATION_DENIED,
+            ),
+            (429, "export_rate_limited", HINT_EXPORT_RATE_LIMITED),
+            (410, "export_download_expired", HINT_EXPORT_DOWNLOAD_EXPIRED),
+            (
+                409,
+                "export_idempotency_conflict",
+                HINT_EXPORT_IDEMPOTENCY_CONFLICT,
+            ),
+        ] {
+            let err = with_params(status, &serde_json::json!({ "reason": reason }));
+            assert_eq!(err.suggestion(), Some(want), "{reason}");
+        }
+        for (droppable, want) in [
+            (serde_json::json!(true), HINT_EXPORT_TOO_LARGE_DROP_COMMENTS),
+            (serde_json::json!(false), HINT_EXPORT_TOO_LARGE),
+            (serde_json::json!(null), HINT_EXPORT_TOO_LARGE),
+        ] {
+            let err = with_params(
+                413,
+                &serde_json::json!({ "reason": "export_too_large", "comments_droppable": droppable }),
+            );
+            assert_eq!(err.suggestion(), Some(want), "droppable={droppable}");
+        }
+        assert!(HINT_EXPORT_TOO_LARGE_DROP_COMMENTS.contains("--comments none"));
+        assert!(HINT_EXPORT_TOO_LARGE_DROP_COMMENTS.contains("--tracked-changes"));
     }
 }

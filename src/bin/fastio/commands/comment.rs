@@ -3,10 +3,83 @@
 /// Handles listing, creating, replying to, and deleting comments
 /// on workspace and share files.
 use anyhow::{Context, Result};
-use serde_json::json;
+use colored::Colorize;
+use serde_json::{Value, json};
 
 use super::CommandContext;
+use crate::cli::CommentFilterArgs;
 use fastio_cli::api;
+use fastio_cli::output::OutputFormat;
+
+/// A `--quote` anchor request as given on the command line.
+#[derive(Debug, Clone)]
+pub struct QuoteArgs {
+    /// The quoted passage.
+    pub exact: String,
+    /// Explicit text before it.
+    pub prefix: Option<String>,
+    /// Explicit text after it.
+    pub suffix: Option<String>,
+    /// 1-based choice among repeated matches.
+    pub occurrence: Option<usize>,
+}
+
+impl QuoteArgs {
+    /// The API-layer request these flags describe.
+    #[must_use]
+    pub fn as_request(&self) -> api::comment::QuoteRequest<'_> {
+        api::comment::QuoteRequest {
+            exact: &self.exact,
+            prefix: self.prefix.as_deref(),
+            suffix: self.suffix.as_deref(),
+            occurrence: self.occurrence,
+        }
+    }
+}
+
+/// The `comment assign` target flags (clap guarantees exactly one of
+/// `assign_self`, `ripley`, `user_id`).
+#[derive(Debug, Clone, Default)]
+pub struct AssignTarget {
+    /// `--self`.
+    pub assign_self: bool,
+    /// `--ripley`.
+    pub ripley: bool,
+    /// `--user-id`.
+    pub user_id: Option<String>,
+    /// `--agent-name` (with `--user-id`).
+    pub agent_name: Option<String>,
+    /// `--credential-type` (with `--agent-name`).
+    pub credential_type: Option<String>,
+    /// `--credential-id` (with `--agent-name`).
+    pub credential_id: Option<String>,
+}
+
+impl AssignTarget {
+    /// The API-layer assignee these flags describe.
+    fn to_assignee(&self) -> Result<api::comment::Assignee<'_>> {
+        match (self.assign_self, self.ripley, self.user_id.as_deref()) {
+            (true, false, None) => Ok(api::comment::Assignee::Caller),
+            (false, true, None) => Ok(api::comment::Assignee::Ripley),
+            (false, false, Some(user_id)) => {
+                anyhow::ensure!(!user_id.trim().is_empty(), "--user-id must not be empty");
+                let agent = match (self.agent_name.as_deref(), self.credential_type.as_deref()) {
+                    (Some(agent_name), Some(credential_type)) => {
+                        Some(api::comment::AgentQualifier {
+                            agent_name,
+                            credential_type,
+                            credential_id: self.credential_id.as_deref(),
+                        })
+                    }
+                    (None, None) => None,
+                    _ => anyhow::bail!("--agent-name and --credential-type go together"),
+                };
+                Ok(api::comment::Assignee::User { user_id, agent })
+            }
+            _ => anyhow::bail!("pass exactly one of --self, --ripley or --user-id"),
+        }
+    }
+}
 
 /// Comment subcommand variants.
 #[derive(Debug, Clone)]
@@ -26,6 +99,8 @@ pub enum CommentCommand {
         limit: Option<u32>,
         /// Offset for pagination.
         offset: Option<u32>,
+        /// Thread filters.
+        filters: CommentFilterArgs,
     },
     /// Add a comment to a file.
     Create {
@@ -39,6 +114,8 @@ pub enum CommentCommand {
         text: String,
         /// Anchoring reference as a JSON object string (or `@file.json`).
         reference: Option<String>,
+        /// Quote anchor (mutually exclusive with `reference`).
+        quote: Option<QuoteArgs>,
         /// Arbitrary metadata as a JSON object string (or `@file.json`).
         properties: Option<String>,
         /// Inline-attach a single object (object ID).
@@ -58,6 +135,34 @@ pub enum CommentCommand {
         comment_id: String,
         /// Reply text.
         text: String,
+        /// Also reopen the thread.
+        reopen: bool,
+    },
+    /// Resolve a comment thread.
+    Resolve {
+        /// Root comment ID.
+        comment_id: String,
+        /// Optional state-version precondition.
+        if_state_version: Option<u64>,
+    },
+    /// Reopen a comment thread.
+    Reopen {
+        /// Root comment ID.
+        comment_id: String,
+        /// Optional state-version precondition.
+        if_state_version: Option<u64>,
+    },
+    /// Assign a comment thread.
+    Assign {
+        /// Root comment ID.
+        comment_id: String,
+        /// Who to assign.
+        target: AssignTarget,
+    },
+    /// Clear a comment thread's assignee.
+    Unassign {
+        /// Root comment ID.
+        comment_id: String,
     },
     /// Edit a comment's text (author-only; by comment ID).
     Edit {
@@ -83,6 +188,8 @@ pub enum CommentCommand {
         limit: Option<u32>,
         /// Offset for pagination.
         offset: Option<u32>,
+        /// Thread filters.
+        filters: CommentFilterArgs,
     },
     /// Get comment details.
     Info {
@@ -192,18 +299,25 @@ pub async fn execute(command: &CommentCommand, ctx: &CommandContext<'_>) -> Resu
             sort,
             limit,
             offset,
+            filters,
         } => {
             validate_entity_args(entity_type, entity_id, node_id)?;
-            list(
-                ctx,
-                entity_type,
-                entity_id,
-                node_id,
-                sort.as_deref(),
-                *limit,
-                *offset,
+            let client = ctx.build_client()?;
+            let value = api::comment::list_comments(
+                &client,
+                &api::comment::ListCommentsParams {
+                    entity_type,
+                    entity_id,
+                    node_id,
+                    sort: sort.as_deref(),
+                    limit: *limit,
+                    offset: *offset,
+                    filters: filters.to_api(),
+                },
             )
             .await
+            .context("failed to list comments")?;
+            render_list(ctx, value)
         }
         CommentCommand::Create {
             entity_type,
@@ -211,6 +325,7 @@ pub async fn execute(command: &CommentCommand, ctx: &CommandContext<'_>) -> Resu
             node_id,
             text,
             reference,
+            quote,
             properties,
             target_id,
             target_ids,
@@ -218,14 +333,17 @@ pub async fn execute(command: &CommentCommand, ctx: &CommandContext<'_>) -> Resu
             validate_entity_args(entity_type, entity_id, node_id)?;
             create(
                 ctx,
-                entity_type,
-                entity_id,
-                node_id,
-                text,
-                reference.as_deref(),
-                properties.as_deref(),
-                target_id.as_deref(),
-                target_ids,
+                &CreateArgs {
+                    entity_type,
+                    entity_id,
+                    node_id,
+                    text,
+                    reference: reference.as_deref(),
+                    quote: quote.as_ref(),
+                    properties: properties.as_deref(),
+                    target_id: target_id.as_deref(),
+                    target_ids,
+                },
             )
             .await
         }
@@ -235,9 +353,64 @@ pub async fn execute(command: &CommentCommand, ctx: &CommandContext<'_>) -> Resu
             node_id,
             comment_id,
             text,
+            reopen,
         } => {
             validate_entity_args(entity_type, entity_id, node_id)?;
-            reply(ctx, entity_type, entity_id, node_id, comment_id, text).await
+            reply(
+                ctx,
+                &api::comment::AddCommentParams {
+                    entity_type,
+                    entity_id,
+                    node_id,
+                    body: text,
+                    parent_id: Some(comment_id),
+                    reference: None,
+                    properties: None,
+                    target_id: None,
+                    target_ids: None,
+                    reopen: *reopen,
+                },
+            )
+            .await
+        }
+        CommentCommand::Resolve {
+            comment_id,
+            if_state_version,
+        } => {
+            let client = ctx.build_client()?;
+            let value = api::comment::resolve_comment(&client, comment_id, *if_state_version)
+                .await
+                .context("failed to resolve comment thread")?;
+            ctx.output.render(&value)?;
+            Ok(())
+        }
+        CommentCommand::Reopen {
+            comment_id,
+            if_state_version,
+        } => {
+            let client = ctx.build_client()?;
+            let value = api::comment::reopen_comment(&client, comment_id, *if_state_version)
+                .await
+                .context("failed to reopen comment thread")?;
+            ctx.output.render(&value)?;
+            Ok(())
+        }
+        CommentCommand::Assign { comment_id, target } => {
+            let assignee = target.to_assignee()?;
+            let client = ctx.build_client()?;
+            let value = api::comment::assign_comment(&client, comment_id, &assignee)
+                .await
+                .context("failed to assign comment thread")?;
+            ctx.output.render(&value)?;
+            Ok(())
+        }
+        CommentCommand::Unassign { comment_id } => {
+            let client = ctx.build_client()?;
+            let value = api::comment::unassign_comment(&client, comment_id)
+                .await
+                .context("failed to unassign comment thread")?;
+            ctx.output.render(&value)?;
+            Ok(())
         }
         CommentCommand::Edit { comment_id, text } => edit(ctx, comment_id, text).await,
         CommentCommand::Delete { comment_id } => delete(ctx, comment_id).await,
@@ -247,18 +420,23 @@ pub async fn execute(command: &CommentCommand, ctx: &CommandContext<'_>) -> Resu
             sort,
             limit,
             offset,
+            filters,
         } => {
             validate_container_entity_type(entity_type)?;
             anyhow::ensure!(!entity_id.trim().is_empty(), "entity ID must not be empty");
-            list_all(
-                ctx,
+            let client = ctx.build_client()?;
+            let value = api::comment::list_all_comments(
+                &client,
                 entity_type,
                 entity_id,
                 sort.as_deref(),
                 *limit,
                 *offset,
+                &filters.to_api(),
             )
             .await
+            .context("failed to list all comments")?;
+            render_list(ctx, value)
         }
         CommentCommand::Info { comment_id } => info(ctx, comment_id).await,
         CommentCommand::React { comment_id, emoji } => react(ctx, comment_id, emoji).await,
@@ -277,73 +455,61 @@ pub async fn execute(command: &CommentCommand, ctx: &CommandContext<'_>) -> Resu
     }
 }
 
-/// List comments on a file.
-async fn list(
-    ctx: &CommandContext<'_>,
-    entity_type: &str,
-    entity_id: &str,
-    node_id: &str,
-    sort: Option<&str>,
-    limit: Option<u32>,
-    offset: Option<u32>,
-) -> Result<()> {
-    let client = ctx.build_client()?;
-    let value = api::comment::list_comments(
-        &client,
-        &api::comment::ListCommentsParams {
-            entity_type,
-            entity_id,
-            node_id,
-            sort,
-            limit,
-            offset,
-        },
-    )
-    .await
-    .context("failed to list comments")?;
-    ctx.output.render(&value)?;
-    Ok(())
+/// Arguments for [`create`].
+struct CreateArgs<'a> {
+    entity_type: &'a str,
+    entity_id: &'a str,
+    node_id: &'a str,
+    text: &'a str,
+    reference: Option<&'a str>,
+    quote: Option<&'a QuoteArgs>,
+    properties: Option<&'a str>,
+    target_id: Option<&'a str>,
+    target_ids: &'a [String],
 }
 
 /// Add a comment.
 ///
-/// Supports the optional create extensions: an anchoring `reference`, arbitrary
-/// `properties`, and inline attachment(s) (`target_id` single or `target_ids`
-/// batch, ≤25). `--target-id` / `--target-ids` are mutually exclusive (enforced
-/// by clap), so an empty `target_ids` slice means "single or none".
-#[allow(clippy::too_many_arguments)]
-async fn create(
-    ctx: &CommandContext<'_>,
-    entity_type: &str,
-    entity_id: &str,
-    node_id: &str,
-    text: &str,
-    reference: Option<&str>,
-    properties: Option<&str>,
-    target_id: Option<&str>,
-    target_ids: &[String],
-) -> Result<()> {
-    let reference = super::parse_json_object_arg(reference, "reference")?;
-    let properties = super::parse_json_object_arg(properties, "properties")?;
-    let target_ids = clean_target_ids(target_ids);
+/// Supports the optional create extensions: an anchoring `reference` (or a
+/// `--quote` anchor built from the note's text), arbitrary `properties`, and
+/// inline attachment(s) (`target_id` single or `target_ids` batch, at most
+/// 25). `--target-id` / `--target-ids` are mutually exclusive (enforced by
+/// clap), so an empty `target_ids` slice means "single or none".
+async fn create(ctx: &CommandContext<'_>, args: &CreateArgs<'_>) -> Result<()> {
+    let properties = super::parse_json_object_arg(args.properties, "properties")?;
+    let target_ids = clean_target_ids(args.target_ids);
     anyhow::ensure!(
         target_ids.len() <= 25,
         "a comment accepts at most 25 attachments (got {})",
         target_ids.len()
     );
     let client = ctx.build_client()?;
+    let reference = match args.quote {
+        Some(quote) => Some(
+            quote_reference(
+                &client,
+                args.entity_type,
+                args.entity_id,
+                args.node_id,
+                quote,
+            )
+            .await?,
+        ),
+        None => super::parse_json_object_arg(args.reference, "reference")?,
+    };
     let value = api::comment::add_comment(
         &client,
         &api::comment::AddCommentParams {
-            entity_type,
-            entity_id,
-            node_id,
-            body: text,
+            entity_type: args.entity_type,
+            entity_id: args.entity_id,
+            node_id: args.node_id,
+            body: args.text,
             parent_id: None,
             reference: reference.as_ref(),
             properties: properties.as_ref(),
-            target_id,
+            target_id: args.target_id,
             target_ids: (!target_ids.is_empty()).then_some(target_ids.as_slice()),
+            reopen: false,
         },
     )
     .await
@@ -352,34 +518,89 @@ async fn create(
     Ok(())
 }
 
-/// Reply to an existing comment.
-async fn reply(
-    ctx: &CommandContext<'_>,
+/// Build a quote anchor's `reference` from the note's text, warning on
+/// stderr when the quote is not in the stored text (it is still sent).
+pub(crate) async fn quote_reference(
+    client: &fastio_cli::client::ApiClient,
     entity_type: &str,
     entity_id: &str,
     node_id: &str,
-    comment_id: &str,
-    text: &str,
-) -> Result<()> {
-    let client = ctx.build_client()?;
-    let value = api::comment::add_comment(
-        &client,
-        &api::comment::AddCommentParams {
-            entity_type,
-            entity_id,
-            node_id,
-            body: text,
-            parent_id: Some(comment_id),
-            reference: None,
-            properties: None,
-            target_id: None,
-            target_ids: None,
-        },
+    quote: &QuoteArgs,
+) -> Result<Value> {
+    let (reference, matched) = api::comment::build_quote_reference(
+        client,
+        entity_type,
+        entity_id,
+        node_id,
+        &quote.as_request(),
     )
     .await
-    .context("failed to reply to comment")?;
+    .context("failed to anchor the quote")?;
+    if matched == api::comment::QuoteMatch::NotFound {
+        eprintln!(
+            "{} {}",
+            "warning:".yellow().bold(),
+            api::comment::QUOTE_NOT_FOUND_WARNING
+        );
+    }
+    Ok(reference)
+}
+
+/// Reply to an existing comment (optionally reopening its thread).
+pub(crate) async fn reply(
+    ctx: &CommandContext<'_>,
+    params: &api::comment::AddCommentParams<'_>,
+) -> Result<()> {
+    let client = ctx.build_client()?;
+    let value = api::comment::add_comment(&client, params)
+        .await
+        .context("failed to reply to comment")?;
     ctx.output.render(&value)?;
     Ok(())
+}
+
+/// Render a comment listing.
+///
+/// For table and CSV, the response's `counts` and `limits` summaries are
+/// moved to one stderr line, so stdout stays one clean table or CSV document
+/// and the summary is not lost. JSON and markdown render the whole response.
+pub(crate) fn render_list(ctx: &CommandContext<'_>, mut value: Value) -> Result<()> {
+    if matches!(ctx.output.format, OutputFormat::Table | OutputFormat::Csv)
+        && let Some(summary) = take_list_summary(&mut value)
+        && !ctx.output.quiet
+    {
+        eprintln!("{summary}");
+    }
+    ctx.output.render(&value)?;
+    Ok(())
+}
+
+/// Remove `counts` and `limits` from a listing and describe them in one
+/// line. `None` when neither carries anything to say.
+fn take_list_summary(value: &mut Value) -> Option<String> {
+    let obj = value.as_object_mut()?;
+    let counts = obj.remove("counts");
+    let limits = obj.remove("limits");
+    let mut parts = Vec::new();
+    if let Some(Value::Object(counts)) = &counts {
+        let pairs: Vec<String> = counts
+            .iter()
+            .filter_map(|(k, v)| v.as_u64().map(|n| format!("{k}={n}")))
+            .collect();
+        if !pairs.is_empty() {
+            parts.push(format!("counts: {}", pairs.join(" ")));
+        }
+    }
+    if let Some(Value::Object(limits)) = &limits
+        && let Some(used) = limits.get("root_threads_used").and_then(Value::as_u64)
+    {
+        let max = limits
+            .get("root_threads_max")
+            .and_then(Value::as_u64)
+            .map_or_else(|| "unlimited".to_owned(), |m| m.to_string());
+        parts.push(format!("threads: {used} of {max}"));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 /// Edit a comment's text.
@@ -402,24 +623,6 @@ async fn delete(ctx: &CommandContext<'_>, comment_id: &str) -> Result<()> {
         "status": "deleted",
         "comment_id": comment_id,
     });
-    ctx.output.render(&value)?;
-    Ok(())
-}
-
-/// List all comments across an entity.
-async fn list_all(
-    ctx: &CommandContext<'_>,
-    entity_type: &str,
-    entity_id: &str,
-    sort: Option<&str>,
-    limit: Option<u32>,
-    offset: Option<u32>,
-) -> Result<()> {
-    let client = ctx.build_client()?;
-    let value =
-        api::comment::list_all_comments(&client, entity_type, entity_id, sort, limit, offset)
-            .await
-            .context("failed to list all comments")?;
     ctx.output.render(&value)?;
     Ok(())
 }
@@ -541,7 +744,62 @@ fn clean_target_ids(target_ids: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_target_ids, validate_container_entity_type, validate_entity_type};
+    use super::{
+        AssignTarget, clean_target_ids, take_list_summary, validate_container_entity_type,
+        validate_entity_type,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn list_summary_moves_counts_and_limits_to_one_line() {
+        let mut value = json!({
+            "threads": [{"id": "c1"}],
+            "counts": {"all": 3, "open": 2},
+            "limits": {"root_threads_used": 3, "root_threads_max": 100},
+            "total": 3
+        });
+        let summary = take_list_summary(&mut value).expect("summary");
+        assert!(
+            summary.contains("all=3") && summary.contains("open=2"),
+            "{summary}"
+        );
+        assert!(summary.contains("threads: 3 of 100"), "{summary}");
+        assert!(value.get("counts").is_none() && value.get("limits").is_none());
+        assert_eq!(value["total"], json!(3));
+
+        let mut unlimited = json!({"limits": {"root_threads_used": 5, "root_threads_max": null}});
+        assert_eq!(
+            take_list_summary(&mut unlimited).as_deref(),
+            Some("threads: 5 of unlimited")
+        );
+
+        let mut flat = json!({"comments": []});
+        assert!(take_list_summary(&mut flat).is_none());
+        assert!(flat.get("comments").is_some());
+    }
+
+    #[test]
+    fn assign_target_maps_each_form() {
+        let me = AssignTarget {
+            assign_self: true,
+            ..AssignTarget::default()
+        };
+        assert!(matches!(
+            me.to_assignee(),
+            Ok(fastio_cli::api::comment::Assignee::Caller)
+        ));
+        let user = AssignTarget {
+            user_id: Some("1000000000000000002".to_owned()),
+            agent_name: Some("helper".to_owned()),
+            credential_type: Some("oauth".to_owned()),
+            ..AssignTarget::default()
+        };
+        assert!(matches!(
+            user.to_assignee(),
+            Ok(fastio_cli::api::comment::Assignee::User { agent: Some(_), .. })
+        ));
+        assert!(AssignTarget::default().to_assignee().is_err());
+    }
 
     #[test]
     fn clean_target_ids_trims_and_drops_blanks() {

@@ -412,22 +412,45 @@ pub async fn read_note(
     version_id: Option<&str>,
 ) -> Result<Value, CliError> {
     let path = note_path(workspace_id, node_id, "readnote");
-    read_note_at(client, &path, version_id).await
+    read_note_at(client, &path, version_id, false).await
+}
+
+/// [`read_note`] that also asks for the note's pending suggested edits
+/// (`include_suggestions=true`).
+///
+/// The response gains a `suggestions` array beside `content`; the text itself
+/// is unaltered. Workspace notes only — the share read path has no such
+/// option. Combines with `version_id`.
+pub async fn read_note_with_suggestions(
+    client: &ApiClient,
+    workspace_id: &str,
+    node_id: &str,
+    version_id: Option<&str>,
+) -> Result<Value, CliError> {
+    let path = note_path(workspace_id, node_id, "readnote");
+    read_note_at(client, &path, version_id, true).await
 }
 
 /// Issue the `readnote/` GET at `path`, threading the optional `version_id`
-/// query parameter. Shared by the workspace and share read paths.
+/// and `include_suggestions` query parameters. Shared by the workspace and
+/// share read paths. With neither set, the request carries no query string.
 async fn read_note_at(
     client: &ApiClient,
     path: &str,
     version_id: Option<&str>,
+    include_suggestions: bool,
 ) -> Result<Value, CliError> {
+    let mut params = HashMap::new();
     if let Some(v) = version_id {
-        let mut params = HashMap::new();
         params.insert("version_id".to_owned(), v.to_owned());
-        client.get_with_params(path, &params).await
-    } else {
+    }
+    if include_suggestions {
+        params.insert("include_suggestions".to_owned(), "true".to_owned());
+    }
+    if params.is_empty() {
         client.get(path).await
+    } else {
+        client.get_with_params(path, &params).await
     }
 }
 
@@ -449,7 +472,7 @@ pub async fn read_note_share(
         urlencoding::encode(share_id),
         urlencoding::encode(node_id),
     );
-    read_note_at(client, &path, version_id).await
+    read_note_at(client, &path, version_id, false).await
 }
 
 /// Build the `/workspace/{id}/cloud-import/{action}/` path.

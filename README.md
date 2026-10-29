@@ -238,7 +238,9 @@ Pipelines that need machine-parseable output can opt back in with
 |-------|-------------|
 | `share` | Share CRUD, files, members, password auth |
 | `fileshare` | File Shares — durable single-file link shares (replaces the retired QuickShare): create/list/info/update/delete, grants, download/versions/preview, upload write-back, activity, ws-token |
-| `comment` | Comments, replies, reactions, attachments |
+| `comment` | Comments, replies, reactions, attachments; thread `resolve` / `reopen` / `assign` / `unassign`; list filters `--status`, `--for-me`, `--kind`, `--include-suggestions`, `--threads`; `--quote` anchors to a passage of a note |
+| `suggestion` | Suggested edits on notes: `create` (`--quote` with `--replacement` or `--delete`), `list`, `reply`, `edit`, `withdraw`, `accept`, `reject`. `accept` rewrites the note and exits `5` when it can only be accepted in the editor |
+| `export` | Export a note to pdf, docx, odt, html, txt, or md (`--to`), with optional comments and tracked changes; download it (`--output`) or save a copy to the workspace (`--save-copy`); `export status` resumes a job |
 | `event` | Activity events, search, polling, org-wide storage change feed (`event changes`) |
 | `preview` | File preview URLs and transforms |
 | `asset` | Org/workspace/user asset management |
@@ -265,7 +267,7 @@ Pipelines that need machine-parseable output can opt back in with
 |-------|-------------|
 | `how-to` | Grounded "how do I…" answers about Fastio itself (alias `howto`) |
 | `id` | Inspect Fastio identifiers offline (no auth, no network): classify an id's entity type and family |
-| `view` | Render a single note or `.md` file node in the terminal |
+| `view` | Render a single note or `.md` file node in the terminal; `--include-suggestions` also returns a note's pending suggested edits |
 | `skill` | Print the built-in agent skill guide |
 | `system` | API health checks: `ping`, `status` (no auth required) |
 
@@ -361,6 +363,16 @@ fastio configure list
 | `--token <jwt>` | One-off bearer token |
 | `--api-base <url>` | Override API base URL |
 | `--version` / `-V` | Print version (root command only, e.g. `fastio --version`) |
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Error (details on stderr) |
+| `2` | Invalid arguments |
+| `3` | Compare-and-swap conflict — the version or thread state you sent is no longer current; re-read and try again |
+| `5` | The suggestion could not be accepted with the note closed — open the note to accept it, or follow the hint (try again shortly when the note is busy; re-read first when an earlier attempt's outcome is unknown) |
 
 ## Configuration
 
