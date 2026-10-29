@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use fastio_cli::api;
 use fastio_cli::error::CliError;
-use fastio_cli::output::view::{ViewMode, render_markdown};
+use fastio_cli::output::view::{ViewMode, render_markdown, render_markdown_to};
 
 use super::CommandContext;
 
@@ -35,6 +35,9 @@ pub struct ViewCommand {
     pub raw: bool,
     /// Optional specific version `OpaqueId`.
     pub version: Option<String>,
+    /// Also fetch the note's pending suggested edits and print
+    /// `{content, suggestions}` through the output formatter.
+    pub include_suggestions: bool,
     /// Reserved no-pager flag (no pager is ever launched).
     pub no_pager: bool,
 }
@@ -57,6 +60,10 @@ pub async fn execute(command: &ViewCommand, ctx: &CommandContext<'_>) -> Result<
         "fastio view: no pager is ever launched"
     );
     let client = ctx.build_client()?;
+
+    if command.include_suggestions {
+        return view_with_suggestions(command, ctx, &client).await;
+    }
 
     // Step 1: try the structured note endpoint.
     let markdown = match api::workspace::read_note(
@@ -112,6 +119,93 @@ pub async fn execute(command: &ViewCommand, ctx: &CommandContext<'_>) -> Result<
     let mode = ViewMode::resolve_runtime(command.raw, ctx.output.no_color);
     render_markdown(&markdown, mode).context("failed to render markdown")?;
     Ok(())
+}
+
+/// `fastio view --include-suggestions`: read the note with its pending
+/// suggested edits and print them in the global output format: json/markdown
+/// print `{content, suggestions}` as structured output; table prints the note,
+/// then the suggestions table; csv emits only the suggestion rows, with a note
+/// on stderr.
+///
+/// Rendering the markdown alone would silently drop the suggestions the
+/// caller asked for, so this path never goes through the terminal viewer
+/// (and clap refuses `--raw` with it). Notes only: a markdown file has no
+/// suggestions, so the raw-file fallback does not apply.
+async fn view_with_suggestions(
+    command: &ViewCommand,
+    ctx: &CommandContext<'_>,
+    client: &fastio_cli::client::ApiClient,
+) -> Result<()> {
+    anyhow::ensure!(
+        !command.raw,
+        "--include-suggestions cannot be combined with --raw"
+    );
+    let value = match api::workspace::read_note_with_suggestions(
+        client,
+        &command.workspace_id,
+        &command.node_id,
+        command.version.as_deref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(err) if is_not_a_note(&err) => {
+            anyhow::bail!(
+                "--include-suggestions applies to notes only; {} is not a note",
+                command.node_id
+            )
+        }
+        Err(err) => return Err(anyhow::Error::new(err).context("failed to read note")),
+    };
+    let shaped = note_with_suggestions(&value);
+    // Table and CSV flatten to the one array in the value, which would drop
+    // `content`, so each gets its own framing. `--fields` applies to the
+    // suggestion rows through the formatter.
+    match ctx.output.format {
+        fastio_cli::output::OutputFormat::Table => {
+            if ctx.output.quiet {
+                return Ok(());
+            }
+            // The note as plain `view` prints it, ended with a newline, then a
+            // blank line, then the suggestions table.
+            let content = shaped["content"].as_str().unwrap_or_default();
+            let mode = ViewMode::resolve_runtime(false, ctx.output.no_color);
+            let mut note = Vec::new();
+            render_markdown_to(&mut note, content, mode).context("failed to render markdown")?;
+            if !note.ends_with(b"\n") {
+                note.push(b'\n');
+            }
+            note.push(b'\n');
+            std::io::Write::write_all(&mut std::io::stdout().lock(), &note)
+                .context("failed to write the note")?;
+            ctx.output.render(&shaped["suggestions"])?;
+        }
+        fastio_cli::output::OutputFormat::Csv => {
+            // CSV carries one table; mixing the note text into it would make
+            // the document invalid. Only the suggestion rows are emitted.
+            if !ctx.output.quiet {
+                eprintln!(
+                    "note: the note text is omitted from CSV output; use --format json or \
+                     --format markdown to get the text and the suggestions together"
+                );
+            }
+            ctx.output.render(&shaped["suggestions"])?;
+        }
+        _ => ctx.output.render(&shaped)?,
+    }
+    Ok(())
+}
+
+/// The `{content, suggestions}` view of a `readnote/` response. A missing
+/// `suggestions` array renders as empty rather than disappearing.
+fn note_with_suggestions(value: &Value) -> Value {
+    serde_json::json!({
+        "content": value.get("content").cloned().unwrap_or(Value::Null),
+        "suggestions": value
+            .get("suggestions")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+    })
 }
 
 /// Extract the `content` string from a `readnote/` response value.
@@ -209,6 +303,23 @@ fn node_type_descriptor(details: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn suggestions_view_keeps_content_and_suggestions() {
+        let v = json!({
+            "content": "Body",
+            "note": {"id": "n1"},
+            "suggestions": [{"id": "c1", "op": "replace"}]
+        });
+        assert_eq!(
+            note_with_suggestions(&v),
+            json!({"content": "Body", "suggestions": [{"id": "c1", "op": "replace"}]})
+        );
+        assert_eq!(
+            note_with_suggestions(&json!({"content": "Body"}))["suggestions"],
+            json!([])
+        );
+    }
 
     #[test]
     fn extracts_note_content() {

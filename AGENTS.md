@@ -250,6 +250,12 @@ care about the exit code).
 file) in the terminal. It always emits rendered markdown — or verbatim with
 `--raw`, when piped, or with `--no-color` — and ignores `--format`/`--fields`.
 Only note nodes and markdown files are supported; other file types are rejected.
+Add `--include-suggestions` (notes only, not combinable with `--raw`) to also
+get the note's pending suggested edits. With `--format json` or `markdown` the
+note `content` and its `suggestions` come back together as structured output.
+With `table`, the note is printed as plain `view` prints it, then the
+suggestions table. With `csv`, only the suggestion rows are emitted (a stderr
+note points to json/markdown for the note text).
 
 ### Inspecting identifiers (offline)
 
@@ -437,6 +443,184 @@ fastio files content --workspace WS_ID NODE_ID --cursor "NEXT_CURSOR"
 
 `indexed: false` is a normal answer, not a failure — that version has no
 extracted text yet, or carries none at all.
+
+## Comment threads and suggested edits
+
+A root comment and its replies form a **thread**, which can be resolved,
+reopened, and assigned to one person. `--entity-type` is `workspace`, `share`,
+or `fileshare`; `--entity-id` is that workspace or share id.
+
+```bash
+# Open threads assigned to you or mentioning you (--for-me=agents: assigned through one of your agents)
+fastio comment list-all --entity-type workspace --entity-id WS_ID --status open --for-me --threads
+
+fastio comment resolve COMMENT_ID [--if-state-version N]   # root comments only; repeating is harmless
+fastio comment reopen  COMMENT_ID [--if-state-version N]
+fastio comment assign  COMMENT_ID --self                   # or --ripley, or --user-id USER_ID
+fastio comment unassign COMMENT_ID
+fastio comment reply COMMENT_ID "Done" --node-id NODE_ID \
+  --entity-type workspace --entity-id WS_ID --reopen       # --reopen also reopens a resolved thread
+```
+
+- **List filters** (`comment list` and `comment list-all`): `--status
+  open|resolved|all`, `--for-me` (or `--for-me=agents`), `--kind
+  comment|suggestion|all`, `--include-suggestions` (suggestion threads are
+  hidden unless asked for), and `--threads` (each root with its replies
+  embedded, plus `counts` and `limits`). With `--format table|csv` the
+  `counts`/`limits` summary goes to one stderr line; json and markdown show it
+  inline.
+- **`assign`** takes exactly one of `--self`, `--ripley`, or `--user-id`
+  (optionally `--agent-name NAME --credential-type oauth|api_key|platform
+  [--credential-id ID]` to assign through one of that user's agents). Tip: an
+  agent using its own credential can simply use `--self` — the server records
+  the agent.
+- `--if-state-version` is a compare-and-swap: if the thread changed since you
+  read it, the command exits `3`. Re-read the thread and decide again.
+
+### Anchoring to a quoted passage
+
+`comment create` and `suggestion create` anchor to a passage of a note with
+`--quote "<exact text>"`, written as it reads (not as markdown). The CLI reads
+the note and derives a short prefix/suffix context for you; `--prefix` /
+`--suffix` give it explicitly, and `--occurrence N` (1-based) picks one match.
+
+```bash
+fastio comment create NODE_ID "Is this date right?" \
+  --entity-type workspace --entity-id WS_ID --quote "March 3, 2026"
+```
+
+- If prefix + quote + suffix occurs **more than once** in the note, the command
+  refuses — add context or `--occurrence N`.
+- If it occurs **zero** times the anchor is still sent, with a stderr warning
+  (the stored note text can lag the live note).
+- Limits: quote ≤ 500 characters, prefix and suffix ≤ 100 each, whole anchor
+  ≤ 2048 bytes. On `comment create`, `--quote` and `--reference` are mutually
+  exclusive.
+
+### Suggested edits
+
+A suggestion proposes replacing or deleting a quoted passage of a note; someone
+with edit rights accepts or rejects it.
+
+```bash
+fastio suggestion create NODE_ID --entity-type workspace --entity-id WS_ID \
+  --quote "net 30" --replacement "net 45" --note "Matches the signed terms"
+fastio suggestion create NODE_ID --entity-type workspace --entity-id WS_ID --quote "draft" --delete
+fastio suggestion list [NODE_ID] --entity-type workspace --entity-id WS_ID --status open
+fastio suggestion reply SUGGESTION_ID "Updated" --node-id NODE_ID --entity-type workspace --entity-id WS_ID
+fastio suggestion edit SUGGESTION_ID --replacement "net 60"     # your own pending suggestion
+fastio suggestion withdraw SUGGESTION_ID                        # your own; cannot be undone here
+fastio suggestion accept SUGGESTION_ID                          # rewrites the note text
+fastio suggestion reject SUGGESTION_ID                          # the note is not changed
+```
+
+- `suggestion list` without a node lists across the whole workspace or share.
+- `accept` applies the edit without the note open in an editor. It sends the
+  request once; it is retried once automatically (after 10 seconds) only on a
+  409 `suggestion_needs_editor` with `retryable: true`, or a 503
+  `suggestion_apply_unknown` (a repeat accept never applies twice).
+- `accept` exits `5` when the suggestion cannot be accepted with the note
+  closed. The hint says which case it is: open the note in the editor to
+  accept it (hand it to a person); or the note is busy, so try again shortly;
+  or an earlier accept's outcome is unknown, so re-read the note and the
+  suggestion's state before doing anything else.
+- `accept` and `withdraw` are destructive.
+
+### Tips for agents working on threads
+
+- When you pick up an assigned thread, consider publishing an intent with
+  topic `comment:<root_comment_id>` so peers can see it:
+
+  ```bash
+  fastio intents allocate --workspace WS_ID --node-id NODE_ID     # returns id and version
+  fastio intents fill INTENT_ID --workspace WS_ID --version VERSION --topic "comment:COMMENT_ID"
+  ```
+
+- Reply with a short summary of what you did, and leave resolving the thread
+  to a person.
+- For a review request, prefer proposing a suggestion over editing the note
+  directly.
+- Leave accepting your own suggestions to someone else.
+
+Over MCP these are `comment` tool actions: `resolve`, `reopen`, `assign`,
+`unassign`, `suggestion-add`, `suggestion-list`, `suggestion-edit`,
+`suggestion-withdraw`, `suggestion-accept`, `suggestion-reject`. `list` and
+`list-all` take `status`, `for_me`, `kind`, `include_suggestions`, and
+`group=threads`; `add` is an alias for `create` and takes the quote params
+`exact`, `prefix`, `suffix`, `occurrence`; `reply` takes `reopen`. The
+`workspace` tool's `read-note` takes `include_suggestions`.
+
+Unlike the CLI, MCP `suggestion-accept` sends the accept ONCE and never
+retries it. On a retryable `suggestion_needs_editor` or a
+`suggestion_apply_unknown`, re-read the note and the suggestion's state before
+accepting again (a repeat accept never applies twice).
+
+## Exporting notes
+
+`fastio export` converts a note to `pdf`, `docx`, `odt`, `html`, `txt`, or `md`
+(`--to`; the global `--format` still controls how the command's own output is
+rendered).
+
+```bash
+# Download the finished file
+fastio export NODE_ID --workspace WS_ID --to pdf --comments margin --output ./note.pdf
+
+# Save the export into the workspace instead (next to the note, or into --folder)
+fastio export NODE_ID --workspace WS_ID --to docx --comments native --tracked-changes --save-copy
+
+# Start it and return at once, then collect it later
+fastio export NODE_ID --workspace WS_ID --to odt --no-wait
+fastio export status EXPORT_ID --output ./note.odt
+```
+
+Options: `--comments none|margin|native|endnotes`, `--include-resolved`,
+`--tracked-changes`, `--version VERSION_ID`, `--page-size letter|a4`,
+`--margins narrow|normal|wide`, `--name FILE_NAME`, `--folder FOLDER_NODE_ID`
+(with `--save-copy`), `--no-wait`, `--timeout SECONDS`.
+
+- Defaults: no comments, letter page size, normal margins, resolved threads
+  excluded. Page size and margins matter for the paged formats (pdf, docx,
+  odt).
+- Comment modes: `margin` (PDF margin column and annotations), `native`
+  (DOCX/ODT native comment threads), `endnotes` (an appendix; the reliable mode
+  for complete thread text), `none`.
+- `--tracked-changes` exports pending suggestions as native tracked changes;
+  docx and odt only.
+- Exactly one of `--output PATH` or `--save-copy` is required unless
+  `--no-wait`. `--output` writes atomically — an existing file is only replaced
+  by a complete download. `--save-copy` prints the new node's id; with
+  `--to md` the copy is a new note, not a file.
+- By default the command waits, polling with backoff (1 s growing to 10 s) up
+  to `--timeout` (default 600 s, at most 86400). On timeout it exits non-zero
+  and prints the export id with a `fastio export status EXPORT_ID` hint.
+  `export status --timeout 0` does a single check, which can still take up to
+  30 seconds if the server is slow.
+- A failed job exits non-zero with a hint for its reason and is never
+  re-submitted automatically. If an export was too large and the server says
+  dropping comments would fit, the hint suggests retrying with `--comments
+  none` and without `--tracked-changes`.
+- The export `report` (pages for PDF, comment threads or suggestions that could
+  not be placed, missing images, dropped items, a truncated flag) is always
+  shown: inline for json/markdown, as one stderr line for table/csv.
+- Each run sends one idempotency key, reused on automatic network retries, so
+  a retried request never starts a second export.
+- The file is downloaded with your credentials directly from the API, and the
+  download never follows a redirect. Exported files expire on the server after
+  24 hours.
+
+Over MCP, the `workspace` tool's `export-note` action (`workspace_id`,
+`node_id`, `format`, `comments`, `include_resolved`, `suggestions none|native`,
+`version_id`, `page_size`, `margins`, `file_name`, `destination
+download|workspace` — default `workspace`; an `md` copy is a new note — and
+`parent_id`) starts the job and, once the server has accepted it, waits up to
+about 25 seconds. It returns `status`, `export_id`, `output`, and `report`, or
+`queued`/`running` with the `export_id` if it is not done yet. If checking the
+job fails, the error still carries the `export_id`: call `export-status` with
+it rather than starting another export. `export-status` (`export_id`, optional
+local `output_path`) is a single check that returns the status and report;
+given `output_path` and a finished `download`-destination export, it saves the
+file locally. A failed export is returned as an error result, with its record
+and hint. Neither action returns credentials or a download URL.
 
 ## E-signature
 
@@ -633,6 +817,11 @@ fastio org members list ORG_ID --limit 50 --offset 0
 - Exit code `0` = success
 - Exit code `1` = error (check stderr)
 - Exit code `2` = invalid arguments (clap parsing error)
+- Exit code `3` = a compare-and-swap conflict (the version or thread state you
+  sent is no longer current) — re-read, then decide again
+- Exit code `5` = the suggestion could not be accepted with the note closed —
+  open the note to accept it, or follow the hint (try again shortly when the
+  note is busy; re-read first when an earlier attempt's outcome is unknown)
 
 Common errors:
 

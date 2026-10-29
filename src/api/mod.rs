@@ -19,6 +19,8 @@ pub mod dashboard;
 pub mod download;
 /// Audit and activity event endpoints.
 pub mod event;
+/// Note export jobs: start, status, and download.
+pub mod export;
 /// File Share (durable single-file link) management + consumption endpoints.
 pub mod fileshare;
 /// How-To (grounded product-guidance) endpoint.

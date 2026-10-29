@@ -394,6 +394,8 @@ pub mod dashboard;
 pub mod download;
 /// Audit and activity event commands.
 pub mod event;
+/// Note export commands.
+pub mod export;
 /// File and folder management commands.
 pub mod files;
 /// File Share (durable single-file link) commands.
@@ -428,6 +430,8 @@ pub mod service_account;
 pub mod share;
 /// E-signature (SignEnvelope) commands.
 pub mod sign;
+/// Suggested-edit commands on notes.
+pub mod suggestion;
 /// System health and status commands.
 pub mod system;
 /// File upload commands.

@@ -1287,6 +1287,52 @@ impl ApiClient {
         .await
     }
 
+    /// [`Self::post_json`] under [`ReplayPolicy::Never`]: once the request may
+    /// have reached the server it is never put on the wire again.
+    ///
+    /// For JSON writes whose effect must not be applied twice by a transport
+    /// replay (e.g. applying a suggested edit to a document). A 502-504, a
+    /// timeout, or a connection dropped after the request was written is
+    /// returned to the caller as-is. Only a CONNECT failure, which provably
+    /// never reached the server, is still retried. Whether to repeat the
+    /// operation itself is the caller's decision, made on the parsed response.
+    ///
+    /// Sent on the no-redirect [`Self::no_redirect_envelope_client`]: the
+    /// default client re-sends a POST body on a 307/308, which would be a
+    /// second application. A 3xx is a terminal [`CliError::Parse`] — whether
+    /// the server acted before redirecting is unknown, so it is reported like
+    /// a lost response and never followed or retried.
+    pub async fn post_json_no_replay<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> Result<T, CliError> {
+        tracing::trace!(method = "POST", path, body = %redact_secret_values_for_log(body), "api request (json, no replay)");
+        let url = self.url(path);
+        let buffered = self
+            .send_and_read_with_retry(
+                || {
+                    let mut req = self.no_redirect_envelope_client.post(&url).json(body);
+                    if let Some(auth) = self.auth_header() {
+                        req = req.header(AUTHORIZATION, auth);
+                    }
+                    req
+                },
+                false,
+                ReplayPolicy::Never,
+                false,
+            )
+            .await?;
+        if buffered.status.is_redirection() {
+            return Err(CliError::Parse(
+                "the server answered with an unexpected redirect; it was not followed, and the \
+                 request may or may not have been applied"
+                    .to_owned(),
+            ));
+        }
+        Self::handle_envelope_body(buffered.status, buffered.body)
+    }
+
     /// Perform a JSON POST and return the raw JSON body **without** the
     /// `result`/`response` envelope unwrap.
     ///
@@ -1640,56 +1686,7 @@ impl ApiClient {
         // Decide error-vs-stream by HTTP status only (a 2xx JSON body is a
         // valid success payload for the audit-certificate endpoint).
         if Self::stream_response_is_error(status.is_success()) {
-            let http_status = status.as_u16();
-            // BOUNDED. This previously called `resp.json()` on the reasoning
-            // that "the error body is small" — an assumption about a remote
-            // server, not a guarantee. `streaming_client` is built with a
-            // CONNECT timeout only and no overall body timeout, so a non-2xx
-            // that dribbles chunked bytes and never terminates would hang a
-            // signing download indefinitely, and a fast enormous body would be
-            // buffered whole.
-            //
-            // The 429 path guards the identical hang with the same bounded
-            // reader. Over the cap or past the deadline yields an empty body →
-            // the generic status message, which is the same fallback already
-            // used for a missing or non-JSON body.
-            let read = tokio::time::timeout(
-                ERROR_BODY_DEADLINE,
-                Self::read_body_capped(resp, ERROR_BODY_CAP),
-            )
-            .await;
-            // `Err` = deadline; `Ok(None)` = over the cap or a transport failure
-            // mid-body. Either way there IS a reason and we could not obtain it —
-            // which is NOT the same as a response that carried no body, and must
-            // not be reported as one. See [`crate::error::ERR_BODY_UNAVAILABLE`].
-            let Ok(Some(bytes)) = read else {
-                return Err(ApiError {
-                    code: 0,
-                    error_code: Some(crate::error::ERR_BODY_UNAVAILABLE.to_owned()),
-                    // `Display` already prints `[HTTP {status}]`, so this does
-                    // NOT repeat it — unlike the older generic fallback
-                    // ("API request failed with HTTP 404"), which renders as
-                    // "[HTTP 404] API request failed with HTTP 404". That
-                    // duplication is pre-existing and used broadly; no reason to
-                    // copy it into new text.
-                    message: "the server's error body could not be read (too large or too \
-                              slow), so the reason it gave is unavailable"
-                        .to_owned(),
-                    http_status,
-                    details: None,
-                }
-                .into());
-            };
-            // A body we DID read but cannot parse stays on the pre-existing
-            // generic fallback — that one really is "no usable body".
-            let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
-            if tracing::enabled!(tracing::Level::TRACE) {
-                tracing::trace!(
-                    body = %redact_secret_values_for_log(&body),
-                    "stream download error body"
-                );
-            }
-            return Err(Self::extract_error(&body, http_status).into());
+            return Err(Self::stream_error(resp).await);
         }
 
         // Stream to a UNIQUE sibling temp file, then atomically rename on
@@ -1922,44 +1919,164 @@ impl ApiClient {
         }
 
         if Self::stream_response_is_error(status.is_success()) {
-            let http_status = status.as_u16();
-            // BOUNDED, and an unreadable body is MARKED rather than silently
-            // becoming a bodyless-looking error. Same reasoning as
-            // `download_file_stream`: this client has a CONNECT timeout only, so
-            // an unbounded `resp.json()` could hang forever on a chunked body
-            // that never terminates. The same pattern applies to every non-2xx
-            // read in this file; all of them must stay bounded.
-            let read = tokio::time::timeout(
-                ERROR_BODY_DEADLINE,
-                Self::read_body_capped(resp, ERROR_BODY_CAP),
-            )
-            .await;
-            let Ok(Some(bytes)) = read else {
-                return Err(ApiError {
-                    code: 0,
-                    error_code: Some(crate::error::ERR_BODY_UNAVAILABLE.to_owned()),
-                    message: "the server's error body could not be read (too large or too \
-                              slow), so the reason it gave is unavailable"
-                        .to_owned(),
-                    http_status,
-                    details: None,
-                }
-                .into());
-            };
-            let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
-            if tracing::enabled!(tracing::Level::TRACE) {
-                tracing::trace!(
-                    body = %redact_secret_values_for_log(&body),
-                    "stream download error body"
-                );
-            }
-            return Err(Self::extract_error(&body, http_status).into());
+            return Err(Self::stream_error(resp).await);
         }
 
         let temp_path = Self::partial_path(output_path);
         let file = Self::create_temp(&temp_path).await?;
         let written = Self::stream_to_temp(resp, file).await;
         Self::finalize_download(written, &temp_path, output_path).await
+    }
+
+    /// Stream a bearer-authenticated binary GET to disk, refusing anything that
+    /// is not the file itself. Returns the bytes written.
+    ///
+    /// For endpoints whose 2xx body is ALWAYS a file (the note export
+    /// download), so two responses that [`Self::download_file_stream`] would
+    /// write to disk are refused instead:
+    ///
+    /// - **A redirect.** The request rides the no-redirect
+    ///   [`Self::no_redirect_streaming_client`] and any 3xx fails closed:
+    ///   following it would send the bearer token to the `Location` target.
+    /// - **A 2xx JSON body.** An `application/json` (or `+json`) success is an
+    ///   API envelope, not an exported file. Its (bounded) body is surfaced as
+    ///   the server's error when it carries one, and nothing is written.
+    ///
+    /// Everything else matches [`Self::download_file_stream`]: bounded error
+    /// bodies, a unique sibling temp file, and an atomic replace on success
+    /// only, so a failed download leaves no partial file and keeps any file
+    /// already at `output_path`. A 429 and 502-504 go through
+    /// [`Self::send_streaming_with_retry`]; the GET is a read, so re-issuing
+    /// it is safe.
+    pub async fn download_file_stream_strict(
+        &self,
+        path: &str,
+        output_path: &std::path::Path,
+    ) -> Result<u64, CliError> {
+        tracing::trace!(method = "GET", path, "api request (strict stream download)");
+        let client = &self.no_redirect_streaming_client;
+        let url = self.url(path);
+        let resp = self
+            .send_streaming_with_retry(
+                || {
+                    let mut req = client.get(&url);
+                    if let Some(auth) = self.auth_header() {
+                        req = req.header(AUTHORIZATION, auth);
+                    }
+                    req
+                },
+                false,
+            )
+            .await?;
+        let status = resp.status();
+        if status.is_redirection() {
+            return Err(CliError::Parse(
+                "the server answered the download with a redirect; refusing to follow it, \
+                 because the request carries your credentials"
+                    .to_owned(),
+            ));
+        }
+        if Self::stream_response_is_error(status.is_success()) {
+            return Err(Self::stream_error(resp).await);
+        }
+        if Self::is_json_content_type(resp.headers()) {
+            return Err(Self::json_instead_of_file(resp).await);
+        }
+
+        let temp_path = Self::partial_path(output_path);
+        let file = Self::create_temp(&temp_path).await?;
+        let written = Self::stream_to_temp(resp, file).await;
+        Self::finalize_download(written, &temp_path, output_path).await
+    }
+
+    /// Whether a response declares a JSON body (`application/json`, any
+    /// `+json` suffix, or `text/json`), ignoring parameters such as `charset`.
+    fn is_json_content_type(headers: &HeaderMap) -> bool {
+        let Some(value) = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+        else {
+            return false;
+        };
+        let essence = value
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        essence == "application/json" || essence == "text/json" || essence.ends_with("+json")
+    }
+
+    /// The error for a 2xx JSON body where a file was expected. The body is
+    /// read under the same cap and deadline as an error body. When it is a
+    /// failed envelope, the server's own error is returned; otherwise a
+    /// refusal that says nothing was written.
+    async fn json_instead_of_file(resp: reqwest::Response) -> CliError {
+        let http_status = resp.status().as_u16();
+        let read = tokio::time::timeout(
+            ERROR_BODY_DEADLINE,
+            Self::read_body_capped(resp, ERROR_BODY_CAP),
+        )
+        .await;
+        if let Ok(Some(bytes)) = read
+            && let Ok(body) = serde_json::from_slice::<Value>(&bytes)
+            && body.get("error").is_some_and(|e| !e.is_null())
+        {
+            return Self::extract_error(&body, http_status).into();
+        }
+        CliError::Parse(
+            "the server returned a JSON document instead of the file; nothing was written"
+                .to_owned(),
+        )
+    }
+
+    /// Turn a non-2xx streaming response into its error, reading the body
+    /// under [`ERROR_BODY_CAP`] and [`ERROR_BODY_DEADLINE`].
+    ///
+    /// BOUNDED. The streaming clients carry a CONNECT timeout only and no
+    /// overall body timeout, so an unbounded `resp.json()` would hang forever
+    /// on a non-2xx that dribbles chunked bytes and never terminates, and a
+    /// fast enormous body would be buffered whole. The 429 path guards the
+    /// identical hang with the same bounded reader.
+    async fn stream_error(resp: reqwest::Response) -> CliError {
+        let http_status = resp.status().as_u16();
+        let read = tokio::time::timeout(
+            ERROR_BODY_DEADLINE,
+            Self::read_body_capped(resp, ERROR_BODY_CAP),
+        )
+        .await;
+        // `Err` = deadline; `Ok(None)` = over the cap or a transport failure
+        // mid-body. Either way there IS a reason and we could not obtain it —
+        // which is NOT the same as a response that carried no body, and must
+        // not be reported as one. See [`crate::error::ERR_BODY_UNAVAILABLE`].
+        let Ok(Some(bytes)) = read else {
+            return ApiError {
+                code: 0,
+                error_code: Some(crate::error::ERR_BODY_UNAVAILABLE.to_owned()),
+                // `Display` already prints `[HTTP {status}]`, so this does
+                // NOT repeat it — unlike the older generic fallback
+                // ("API request failed with HTTP 404"), which renders as
+                // "[HTTP 404] API request failed with HTTP 404". That
+                // duplication is pre-existing and used broadly; no reason to
+                // copy it into new text.
+                message: "the server's error body could not be read (too large or too \
+                          slow), so the reason it gave is unavailable"
+                    .to_owned(),
+                http_status,
+                details: None,
+            }
+            .into();
+        };
+        // A body we DID read but cannot parse stays on the pre-existing
+        // generic fallback — that one really is "no usable body".
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(
+                body = %redact_secret_values_for_log(&body),
+                "stream download error body"
+            );
+        }
+        Self::extract_error(&body, http_status).into()
     }
 
     /// Stream a File Share preview to disk, manually following at most one

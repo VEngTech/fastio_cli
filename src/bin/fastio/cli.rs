@@ -164,6 +164,19 @@ pub enum Commands {
     /// File comments.
     #[command(subcommand)]
     Comment(CommentCommands),
+    /// Suggested edits on notes: create, list, reply, edit, withdraw, accept,
+    /// reject.
+    #[command(subcommand)]
+    Suggestion(SuggestionCommands),
+    /// Export a note to pdf, docx, odt, html, txt or md, with its comments
+    /// and suggested edits if you like.
+    ///
+    /// The export runs on the server. By default the command waits for it,
+    /// then downloads the file to `--output` or saves a copy in the workspace
+    /// (`--save-copy`). `--no-wait` prints the export ID instead; `fastio
+    /// export status <id>` picks it up later. Exported files are kept for 24
+    /// hours.
+    Export(ExportArgs),
     /// Activity events.
     #[command(subcommand)]
     Event(EventCommands),
@@ -206,9 +219,10 @@ pub enum Commands {
 
     /// Render a markdown note or `.md` file in the terminal.
     ///
-    /// This is a dedicated markdown viewer: it always emits rendered (or, with
+    /// This is a dedicated markdown viewer: it emits rendered (or, with
     /// `--raw`/when piped, verbatim) markdown and ignores the global `--format`
-    /// and `--fields` flags. Only note nodes and markdown files are supported;
+    /// and `--fields` flags, except with `--include-suggestions`, which follows
+    /// them. Only note nodes and markdown files are supported;
     /// other file types are rejected rather than dumped as raw bytes.
     View {
         /// Workspace ID.
@@ -221,6 +235,13 @@ pub enum Commands {
         /// Read a specific version (note version `OpaqueId`).
         #[arg(long)]
         version: Option<String>,
+        /// Also return the note's pending suggested edits, following the
+        /// global `--format`: json/markdown print `content` and `suggestions`
+        /// together as structured output; table prints the note, then the
+        /// suggestions table; csv emits only the suggestion rows, with a note
+        /// on stderr. Notes only; not combinable with `--raw`.
+        #[arg(long, conflicts_with = "raw")]
+        include_suggestions: bool,
         /// Reserved: disable paging. (No pager is ever launched; accepted for
         /// forward-compatibility and to make non-interactive intent explicit.)
         #[arg(long)]
@@ -4696,8 +4717,16 @@ pub enum CommentCommands {
         /// Offset for pagination.
         #[arg(long)]
         offset: Option<u32>,
+        /// Thread filters.
+        #[command(flatten)]
+        filters: CommentFilterArgs,
     },
     /// Add a comment to a file.
+    ///
+    /// `--quote` anchors the comment to a passage of a note. The text around
+    /// the passage is read from the note and sent as context; when the
+    /// passage appears more than once, add `--prefix` / `--suffix` or pick one
+    /// with `--occurrence N`.
     Create {
         /// Storage node ID.
         node_id: String,
@@ -4718,8 +4747,25 @@ pub enum CommentCommands {
         /// `document` (`page`, `text_snippet`) · `video`/`audio` (`timestamp`) ·
         /// `image` (region) · `general` (none). An unrecognized `type` is
         /// rejected — `page` is an ANCHOR FIELD, not a type.
-        #[arg(long)]
+        /// Mutually exclusive with `--quote`.
+        #[arg(long, conflicts_with = "quote")]
         reference: Option<String>,
+        /// Anchor the comment to this passage of the note, written as it reads
+        /// (not as markdown). At most 500 characters.
+        #[arg(long)]
+        quote: Option<String>,
+        /// Text immediately before the quoted passage (default: read from the
+        /// note). At most 100 characters; may be empty.
+        #[arg(long, requires = "quote")]
+        prefix: Option<String>,
+        /// Text immediately after the quoted passage (default: read from the
+        /// note). At most 100 characters; may be empty.
+        #[arg(long, requires = "quote")]
+        suffix: Option<String>,
+        /// When the passage appears more than once, anchor the Nth match
+        /// (1-based).
+        #[arg(long, requires = "quote")]
+        occurrence: Option<usize>,
         /// Arbitrary metadata as a JSON object string (or `@file.json`).
         #[arg(long)]
         properties: Option<String>,
@@ -4749,6 +4795,66 @@ pub enum CommentCommands {
         /// Entity ID (workspace or share ID).
         #[arg(long)]
         entity_id: String,
+        /// Also reopen the thread if it is resolved. A reply never reopens a
+        /// thread on its own.
+        #[arg(long)]
+        reopen: bool,
+    },
+    /// Resolve a comment thread (root comments only; repeating is harmless).
+    Resolve {
+        /// Root comment ID.
+        comment_id: String,
+        /// Only resolve if the thread is still at this state version (from a
+        /// previous read); otherwise the server refuses.
+        #[arg(long)]
+        if_state_version: Option<u64>,
+    },
+    /// Reopen a resolved comment thread (root comments only).
+    Reopen {
+        /// Root comment ID.
+        comment_id: String,
+        /// Only reopen if the thread is still at this state version.
+        #[arg(long)]
+        if_state_version: Option<u64>,
+    },
+    /// Assign a comment thread to one person (root comments only).
+    ///
+    /// Exactly one of `--self`, `--ripley` or `--user-id`. An agent using its
+    /// own credential should use `--self`: the server records the agent.
+    #[command(group(
+        clap::ArgGroup::new("assignee")
+            .required(true)
+            .args(["assign_self", "ripley", "user_id"])
+    ))]
+    Assign {
+        /// Root comment ID.
+        comment_id: String,
+        /// Assign to yourself.
+        #[arg(long = "self")]
+        assign_self: bool,
+        /// Assign to Ripley, on your behalf.
+        #[arg(long)]
+        ripley: bool,
+        /// Assign to this user.
+        #[arg(long)]
+        user_id: Option<String>,
+        /// With `--user-id`: assign through this agent of theirs (its display
+        /// name). Requires `--credential-type`.
+        #[arg(long, requires = "user_id", requires = "credential_type")]
+        agent_name: Option<String>,
+        /// The agent's credential type: `oauth`, `api_key`, or `platform`.
+        #[arg(long, requires = "agent_name", value_parser = clap::builder::PossibleValuesParser::new(
+            fastio_cli::api::comment::ASSIGNEE_CREDENTIAL_TYPES
+        ))]
+        credential_type: Option<String>,
+        /// The agent's credential id, when known.
+        #[arg(long, requires = "agent_name")]
+        credential_id: Option<String>,
+    },
+    /// Clear a comment thread's assignee.
+    Unassign {
+        /// Root comment ID.
+        comment_id: String,
     },
     /// Edit a comment's text (author-only; works for any comment by ID).
     Edit {
@@ -4783,6 +4889,9 @@ pub enum CommentCommands {
         /// Offset for pagination.
         #[arg(long)]
         offset: Option<u32>,
+        /// Thread filters.
+        #[command(flatten)]
+        filters: CommentFilterArgs,
     },
     /// Get comment details.
     Info {
@@ -4840,6 +4949,334 @@ pub enum CommentCommands {
         /// Object ID to detach.
         #[arg(long)]
         target_id: String,
+    },
+}
+
+/// Thread filters shared by `comment list` and `comment list-all`. Each is
+/// sent only when given, so passing none sends the same request as before
+/// these existed.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct CommentFilterArgs {
+    /// Thread state: open, resolved, or all (server default: all).
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(
+        fastio_cli::api::comment::COMMENT_STATUS_VALUES
+    ))]
+    pub status: Option<String>,
+    /// Only threads for you: assigned to you, or mentioning you.
+    /// `--for-me=agents` lists threads assigned to you through one of your
+    /// agents instead.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = clap::builder::PossibleValuesParser::new(
+            fastio_cli::api::comment::COMMENT_FOR_ME_VALUES
+        )
+    )]
+    pub for_me: Option<String>,
+    /// Thread kind: comment, suggestion, or all. `suggestion` implies
+    /// `--include-suggestions`.
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(
+        fastio_cli::api::comment::COMMENT_KIND_VALUES
+    ))]
+    pub kind: Option<String>,
+    /// Include suggested-edit threads (hidden unless asked for).
+    #[arg(long)]
+    pub include_suggestions: bool,
+    /// Page by thread: each root comment with its replies embedded, plus
+    /// `counts` and `limits`.
+    #[arg(long)]
+    pub threads: bool,
+}
+
+impl CommentFilterArgs {
+    /// The API-layer filter set these flags describe.
+    #[must_use]
+    pub fn to_api(&self) -> fastio_cli::api::comment::CommentListFilters<'_> {
+        fastio_cli::api::comment::CommentListFilters {
+            status: self.status.as_deref(),
+            for_me: self.for_me.as_deref(),
+            kind: self.kind.as_deref(),
+            include_suggestions: self.include_suggestions,
+            threads: self.threads,
+        }
+    }
+}
+
+// ─── Suggestion ─────────────────────────────────────────────────────────────
+
+/// Suggested edits on notes: proposed replacements (or deletions) of a quoted
+/// passage, which someone with edit rights accepts or rejects.
+///
+/// Prefer suggesting over editing a note directly when your change needs
+/// review, and leave accepting your own suggestion to someone else.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum SuggestionCommands {
+    /// Suggest replacing (or deleting) a quoted passage of a note.
+    ///
+    /// The text around the passage is read from the note and sent as context;
+    /// when the passage appears more than once, add `--prefix` / `--suffix` or
+    /// pick one with `--occurrence N`.
+    Create {
+        /// Note node ID.
+        node_id: String,
+        /// Entity type: workspace, share, or fileshare.
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(
+            crate::commands::comment::VALID_ENTITY_TYPES
+        ))]
+        entity_type: String,
+        /// Entity ID (workspace or share ID).
+        #[arg(long)]
+        entity_id: String,
+        /// The passage to change, written as it reads (not as markdown), on a
+        /// single line. At most 500 characters.
+        #[arg(long)]
+        quote: String,
+        /// Text immediately before the passage (default: read from the note).
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Text immediately after the passage (default: read from the note).
+        #[arg(long)]
+        suffix: Option<String>,
+        /// When the passage appears more than once, target the Nth match
+        /// (1-based).
+        #[arg(long)]
+        occurrence: Option<usize>,
+        /// The replacement text, sent exactly as given.
+        #[arg(long, conflicts_with = "delete", required_unless_present = "delete")]
+        replacement: Option<String>,
+        /// Suggest deleting the passage instead of replacing it.
+        #[arg(long)]
+        delete: bool,
+        /// Why you suggest this (shown with the suggestion).
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List suggestion threads on a note, or across a workspace or share when
+    /// no node is given.
+    List {
+        /// Note node ID (omit to list across the whole workspace or share).
+        node_id: Option<String>,
+        /// Entity type: workspace, share, or fileshare (fileshare needs a
+        /// node).
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(
+            crate::commands::comment::VALID_ENTITY_TYPES
+        ))]
+        entity_type: String,
+        /// Entity ID (workspace or share ID).
+        #[arg(long)]
+        entity_id: String,
+        /// State: open (pending), resolved (decided), or all.
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(
+            fastio_cli::api::comment::COMMENT_STATUS_VALUES
+        ))]
+        status: Option<String>,
+        /// Only suggestions for you; `--for-me=agents` for those assigned
+        /// through one of your agents.
+        #[arg(
+            long,
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "true",
+            value_parser = clap::builder::PossibleValuesParser::new(
+                fastio_cli::api::comment::COMMENT_FOR_ME_VALUES
+            )
+        )]
+        for_me: Option<String>,
+        /// Page by thread, with replies embedded.
+        #[arg(long)]
+        threads: bool,
+        /// Sort order: asc or desc (default asc).
+        #[arg(long, value_parser = ["asc", "desc"])]
+        sort: Option<String>,
+        /// Maximum number of results.
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Offset for pagination.
+        #[arg(long)]
+        offset: Option<u32>,
+    },
+    /// Reply to a suggestion thread (an ordinary comment reply).
+    Reply {
+        /// Suggestion (root comment) ID.
+        comment_id: String,
+        /// Reply text.
+        text: String,
+        /// Note node ID.
+        #[arg(long)]
+        node_id: String,
+        /// Entity type: workspace, share, or fileshare.
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(
+            crate::commands::comment::VALID_ENTITY_TYPES
+        ))]
+        entity_type: String,
+        /// Entity ID (workspace or share ID).
+        #[arg(long)]
+        entity_id: String,
+        /// Also reopen the thread.
+        #[arg(long)]
+        reopen: bool,
+    },
+    /// Change your own pending suggestion. The quoted passage cannot change.
+    Edit {
+        /// Suggestion ID.
+        comment_id: String,
+        /// New replacement text.
+        #[arg(long, conflicts_with = "delete")]
+        replacement: Option<String>,
+        /// Make it a deletion of the passage.
+        #[arg(long)]
+        delete: bool,
+        /// New rationale.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Withdraw your own pending suggestion. Cannot be undone here.
+    Withdraw {
+        /// Suggestion ID.
+        comment_id: String,
+    },
+    /// Accept a suggestion: the note text is rewritten.
+    ///
+    /// Applied with the note closed when it can be. Retried once after 10
+    /// seconds only on a 409 `suggestion_needs_editor` with `retryable: true`,
+    /// or a 503 `suggestion_apply_unknown`.
+    /// Exits 5 when the suggestion cannot be accepted with the note closed
+    /// (open the note to accept it, or follow the hint: try again shortly when
+    /// the note is busy, re-read first when an earlier attempt's outcome is
+    /// unknown); exits 1 for every other refusal.
+    Accept {
+        /// Suggestion ID.
+        comment_id: String,
+    },
+    /// Reject a pending suggestion. The note is not changed.
+    Reject {
+        /// Suggestion ID.
+        comment_id: String,
+    },
+}
+
+// ─── Export ─────────────────────────────────────────────────────────────────
+
+/// `fastio export <node_id> …` starts an export; `fastio export status <id>`
+/// checks one.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(clap::Args, Debug)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct ExportArgs {
+    /// Check an existing export instead of starting one.
+    #[command(subcommand)]
+    pub command: Option<ExportCommands>,
+    /// Node ID of the note to export.
+    #[arg(required = true)]
+    pub node_id: Option<String>,
+    /// Workspace ID.
+    #[arg(long, required = true)]
+    pub workspace: Option<String>,
+    /// Export format. (`--format` stays the output format of this command's
+    /// own result.)
+    #[arg(
+        long,
+        required = true,
+        value_parser = clap::builder::PossibleValuesParser::new(fastio_cli::api::export::EXPORT_FORMATS)
+    )]
+    pub to: Option<String>,
+    /// How comment threads appear: `none`, `margin` (PDF margin column plus
+    /// annotations), `native` (DOCX/ODT comment threads), or `endnotes` (an
+    /// appendix; the reliable mode for complete thread text).
+    #[arg(
+        long,
+        default_value = fastio_cli::api::export::DEFAULT_COMMENT_MODE,
+        value_parser = clap::builder::PossibleValuesParser::new(fastio_cli::api::export::EXPORT_COMMENT_MODES)
+    )]
+    pub comments: String,
+    /// Include resolved comment threads.
+    #[arg(long)]
+    pub include_resolved: bool,
+    /// Export pending suggestions as native tracked changes (docx and odt
+    /// only).
+    #[arg(long)]
+    pub tracked_changes: bool,
+    /// Export a specific note version instead of the current text.
+    #[arg(long, value_name = "VERSION_ID")]
+    pub version: Option<String>,
+    /// Page size for pdf, docx and odt.
+    #[arg(
+        long,
+        default_value = fastio_cli::api::export::DEFAULT_PAGE_SIZE,
+        value_parser = clap::builder::PossibleValuesParser::new(fastio_cli::api::export::EXPORT_PAGE_SIZES)
+    )]
+    pub page_size: String,
+    /// Page margins for pdf, docx and odt.
+    #[arg(
+        long,
+        default_value = fastio_cli::api::export::DEFAULT_MARGINS,
+        value_parser = clap::builder::PossibleValuesParser::new(fastio_cli::api::export::EXPORT_MARGINS)
+    )]
+    pub margins: String,
+    /// File name for the exported file.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Download the finished file to this path. An existing file is replaced
+    /// only by a complete download.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["save_copy", "no_wait"],
+        required_unless_present_any = ["save_copy", "no_wait"]
+    )]
+    pub output: Option<std::path::PathBuf>,
+    /// Save the export into the workspace instead (next to the note, or in
+    /// `--folder`), and print the new node's ID. With `--to md` the copy is a
+    /// new note rather than a file.
+    #[arg(long)]
+    pub save_copy: bool,
+    /// Folder for `--save-copy`.
+    #[arg(long, value_name = "FOLDER_ID", requires = "save_copy")]
+    pub folder: Option<String>,
+    /// Print the export ID and return without waiting. Check it later with
+    /// `fastio export status <id>`.
+    #[arg(long)]
+    pub no_wait: bool,
+    /// How long to wait for the export to finish, in seconds (at most 86400).
+    /// On timeout the command exits non-zero and prints the export ID.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = 600,
+        value_parser = clap::value_parser!(u64).range(0..=EXPORT_MAX_TIMEOUT_SECS)
+    )]
+    pub timeout: u64,
+}
+
+/// Longest `--timeout` an export command accepts: one day.
+pub const EXPORT_MAX_TIMEOUT_SECS: u64 = 86_400;
+
+/// Export subcommands.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum ExportCommands {
+    /// Check an export: wait for it to finish (up to `--timeout`), then
+    /// download the file to `--output` or print the saved copy. `--timeout 0`
+    /// is a single check, which can still take up to 30 seconds if the server
+    /// is slow. A failed export is reported, never started again.
+    Status {
+        /// Export ID.
+        export_id: String,
+        /// Download the finished file to this path.
+        #[arg(long, value_name = "PATH")]
+        output: Option<std::path::PathBuf>,
+        /// How long to wait for the export to finish, in seconds (at most
+        /// 86400).
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 600,
+            value_parser = clap::value_parser!(u64).range(0..=EXPORT_MAX_TIMEOUT_SECS)
+        )]
+        timeout: u64,
     },
 }
 
@@ -7557,8 +7994,8 @@ impl fmt::Debug for UserEmailChangeCommands {
 #[cfg(test)]
 mod ripley_alias_tests {
     use super::{
-        Cli, Commands, OrgBillingCommands, OrgCommands, RipleyCommands, SearchCommands,
-        SignCommands, SignDocumentCommands, SignEnvelopeCommands,
+        Cli, Commands, ExportArgs, ExportCommands, OrgBillingCommands, OrgCommands, RipleyCommands,
+        SearchCommands, SignCommands, SignDocumentCommands, SignEnvelopeCommands,
     };
     use clap::{CommandFactory, Parser};
 
@@ -7664,16 +8101,150 @@ mod ripley_alias_tests {
                 node_id,
                 raw,
                 version,
+                include_suggestions,
                 no_pager,
             } => {
                 assert_eq!(workspace_id, "ws1");
                 assert_eq!(node_id, "n1");
                 assert!(raw);
                 assert_eq!(version.as_deref(), Some("v3"));
+                assert!(!include_suggestions);
                 assert!(no_pager);
             }
             other => panic!("expected View, got {other:?}"),
         }
+    }
+
+    fn export_args(cli: Cli) -> ExportArgs {
+        match cli.command {
+            Commands::Export(args) => args,
+            other => panic!("expected Export, got {other:?}"),
+        }
+    }
+
+    /// `--to` picks the export format while the global `--format` still picks
+    /// how the command's own result is rendered.
+    #[test]
+    fn export_to_and_global_format_coexist() {
+        let cli = Cli::try_parse_from([
+            "fastio",
+            "export",
+            "n1",
+            "--workspace",
+            "ws1",
+            "--to",
+            "pdf",
+            "--format",
+            "json",
+            "--output",
+            "out.pdf",
+        ])
+        .expect("export should parse");
+        assert_eq!(cli.format.as_deref(), Some("json"));
+        let args = export_args(cli);
+        assert_eq!(args.to.as_deref(), Some("pdf"));
+        assert_eq!(args.node_id.as_deref(), Some("n1"));
+        assert_eq!(args.comments, "none");
+        assert_eq!(args.page_size, "letter");
+        assert_eq!(args.margins, "normal");
+        assert_eq!(args.timeout, 600);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn export_needs_exactly_one_destination() {
+        let base = [
+            "fastio",
+            "export",
+            "n1",
+            "--workspace",
+            "ws1",
+            "--to",
+            "docx",
+        ];
+        let with = |extra: &[&'static str]| {
+            Cli::try_parse_from(base.iter().copied().chain(extra.iter().copied()))
+        };
+        assert!(with(&[]).is_err(), "no --output or --save-copy");
+        assert!(with(&["--output", "a.docx", "--save-copy"]).is_err());
+        assert!(with(&["--output", "a.docx", "--no-wait"]).is_err());
+        assert!(
+            with(&["--folder", "f1"]).is_err(),
+            "--folder needs --save-copy"
+        );
+        assert!(with(&["--save-copy", "--folder", "f1"]).is_ok());
+        assert!(with(&["--no-wait"]).is_ok());
+        assert!(with(&["--output", "a.docx", "--tracked-changes"]).is_ok());
+        assert!(with(&["--output", "a.docx", "--comments", "inline"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "fastio",
+                "export",
+                "n1",
+                "--workspace",
+                "ws1",
+                "--to",
+                "rtf",
+                "--no-wait"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn export_status_is_a_subcommand() {
+        let cli = Cli::try_parse_from([
+            "fastio",
+            "export",
+            "status",
+            "e1",
+            "--output",
+            "a.pdf",
+            "--timeout",
+            "0",
+        ])
+        .expect("export status should parse");
+        match export_args(cli).command {
+            Some(ExportCommands::Status {
+                export_id,
+                output,
+                timeout,
+            }) => {
+                assert_eq!(export_id, "e1");
+                assert_eq!(output.as_deref(), Some(std::path::Path::new("a.pdf")));
+                assert_eq!(timeout, 0);
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+        // A timeout past one day is refused by the parser on both commands.
+        for timeout in ["86401", "18446744073709551615"] {
+            assert!(
+                Cli::try_parse_from(["fastio", "export", "status", "e1", "--timeout", timeout])
+                    .is_err(),
+                "status {timeout}"
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "fastio",
+                    "export",
+                    "n1",
+                    "--workspace",
+                    "ws1",
+                    "--to",
+                    "pdf",
+                    "--no-wait",
+                    "--timeout",
+                    timeout,
+                ])
+                .is_err(),
+                "start {timeout}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["fastio", "export", "status", "e1", "--timeout", "86400"]).is_ok()
+        );
+        // A start flag does not mix with the status subcommand.
+        assert!(Cli::try_parse_from(["fastio", "export", "status", "e1", "--to", "pdf"]).is_err());
     }
 
     #[test]
