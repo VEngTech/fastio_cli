@@ -156,9 +156,8 @@ pub enum Commands {
     #[command(subcommand)]
     Share(ShareCommands),
     /// Offload multi-step work to Ripley — Fast.io's AI agent. Ask questions
-    /// about your content and generate AI shares. To find things, use `fastio
-    /// search` instead. (The former `ai` group; `ai` still works as a hidden
-    /// alias.)
+    /// about your content. To find things, use `fastio search` instead. (The
+    /// former `ai` group; `ai` still works as a hidden alias.)
     #[command(subcommand, alias = "ai")]
     Ripley(RipleyCommands),
     /// File comments.
@@ -5959,14 +5958,6 @@ pub enum RipleyCommands {
         #[arg(long)]
         offset: Option<u32>,
     },
-    /// Generate a shareable AI summary from specific workspace files.
-    Summary {
-        /// Workspace ID.
-        #[arg(long)]
-        workspace: String,
-        /// File node IDs to include in the summary (at least one required).
-        node_ids: Vec<String>,
-    },
     /// Cancel an in-progress chat message (idempotent; safe when nothing is pending).
     Cancel {
         /// Workspace ID.
@@ -8744,6 +8735,23 @@ mod ripley_alias_tests {
             let cli = Cli::try_parse_from(["fastio", "ripley", verb, "JOB123"])
                 .unwrap_or_else(|e| panic!("`ripley {verb}` should parse: {e}"));
             assert!(matches!(cli.command, Commands::Ripley(_)));
+        }
+    }
+
+    #[test]
+    fn retired_ripley_summary_is_rejected_under_both_spellings() {
+        // The AI Share link (`summary`) verb was removed with its endpoint.
+        // The `ai` group alias must not keep it reachable either.
+        for group in ["ripley", "ai"] {
+            let res = Cli::try_parse_from(["fastio", group, "summary", "--workspace", "1", "n1"]);
+            // Assert the KIND, so the test cannot pass for an unrelated
+            // reason (e.g. a renamed `--workspace` flag).
+            let kind = res.err().map(|e| e.kind());
+            assert_eq!(
+                kind,
+                Some(clap::error::ErrorKind::InvalidSubcommand),
+                "`{group} summary` was retired and must be an unknown subcommand"
+            );
         }
     }
 

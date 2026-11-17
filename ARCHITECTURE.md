@@ -144,7 +144,7 @@ Each module contains typed functions mapping to Fast.io REST endpoints:
 | `download.rs` | 2 functions | Token-based downloads, ZIP |
 | `share.rs` | 16 functions | CRUD, storage, members, password |
 | `search.rs` | 2 functions | Unified grouped-bucket search (`/search/`) — one query across a workspace or share, returned as `files` / `metadata` / `comments` buckets. The primary search surface; `storage.rs`'s `search_files` is the flat filename/content leg |
-| `ai.rs` | 14 functions | Chat CRUD, messages, summarize (search is NOT here — see `search.rs`) |
+| `ai.rs` | 14 functions | Chat CRUD, messages (search is NOT here — see `search.rs`) |
 | `comment.rs` | 12 functions | CRUD, reactions |
 | `event.rs` | 5 functions | Search, summarize, details, polling |
 | `member.rs` | 9 functions | Add, remove, transfer, leave, join |

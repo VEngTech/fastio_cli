@@ -2511,13 +2511,6 @@ fn map_ripley_command(cmd: cli::RipleyCommands) -> AiCommand {
             limit,
             offset,
         },
-        cli::RipleyCommands::Summary {
-            workspace,
-            node_ids,
-        } => AiCommand::Summary {
-            workspace,
-            node_ids,
-        },
         cli::RipleyCommands::Cancel {
             workspace,
             share,

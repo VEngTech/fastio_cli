@@ -361,7 +361,6 @@ fastio ripley chat --workspace WS_ID --chat-id CHAT_ID "Continue"   # follow-up
 fastio ripley list --workspace WS_ID --kind all          # chats
 fastio ripley details CHAT_ID --workspace WS_ID
 fastio ripley messages CHAT_ID --workspace WS_ID
-fastio ripley summary --workspace WS_ID NODE_ID1 NODE_ID2     # AI share
 ```
 
 ### Unified search

@@ -1837,7 +1837,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "ripley",
-        description: "Offload multi-step work to Ripley, Fast.io's AI agent: ask a question and get the answer (ask — creates a chat and waits), lower-level chat create/list/details/update/delete/publish/cancel, message send/list/details/read, generate AI shares (share-generate), transactions, and autotitle. Searching is NOT a Ripley action. (Formerly the `ai` tool; `ai` still works as a hidden alias.)",
+        description: "Offload multi-step work to Ripley, Fast.io's AI agent: ask a question and get the answer (ask — creates a chat and waits), lower-level chat create/list/details/update/delete/publish/cancel, message send/list/details/read, transactions, and autotitle. Searching is NOT a Ripley action. (Formerly the `ai` tool; `ai` still works as a hidden alias.)",
         actions: &[
             "ask",
             "chat-create",
@@ -1851,7 +1851,6 @@ const TOOL_DEFS: &[ToolDef] = &[
             "message-list",
             "message-details",
             "message-read",
-            "share-generate",
             "transactions",
             "autotitle",
             // Universal: every tool self-describes. Declared so a STRICT
@@ -1862,7 +1861,7 @@ const TOOL_DEFS: &[ToolDef] = &[
         params: &[
             (
                 "context_type",
-                "Context: workspace or share (chat/message/share/transactions/autotitle)",
+                "Context: workspace or share (chat/message/transactions/autotitle)",
                 false,
             ),
             ("context_id", "Workspace or share ID", false),
@@ -1931,16 +1930,6 @@ const TOOL_DEFS: &[ToolDef] = &[
                 "Comma-separated file nodeId[:versionId] pairs (chat-create, message-send, ask). \
                  Collapses to the same file items in the `references` array as files_scope; \
                  may be combined with files_scope/folders_scope.",
-                false,
-            ),
-            (
-                "node_ids",
-                "Comma-separated file IDs (share-generate; converted to a JSON `files` array)",
-                false,
-            ),
-            (
-                "files",
-                "Comma-separated file IDs (share-generate; converted to a JSON `files` array)",
                 false,
             ),
             (
@@ -9169,7 +9158,6 @@ async fn handle_ai(
         "message-send" => handle_ai_message_send(state, args).await,
         "message-list" => handle_ai_message_list(state, args).await,
         "message-details" | "message-read" => handle_ai_message_details(state, args).await,
-        "share-generate" => handle_ai_share_generate(state, args).await,
         "transactions" => handle_ai_transactions(state, args).await,
         "autotitle" => handle_ai_autotitle(state, args).await,
         _ => Ok(error_text(&format!("Unknown ripley action: {action}"))),
@@ -9691,69 +9679,6 @@ async fn handle_ai_message_details(
             attach_turn_limit_note(&mut v, chat_id);
             Ok(success_json(&v))
         }
-        Err(e) => Ok(cli_err_to_result(&e)),
-    }
-}
-
-async fn handle_ai_share_generate(
-    state: &McpState,
-    args: &Map<String, Value>,
-) -> Result<CallToolResult, McpError> {
-    let client = state.client().read().await;
-    let ctx_type = match optional_str_strict(args, "context_type") {
-        Ok(v) => v.unwrap_or("workspace"),
-        Err(e) => return Ok(e),
-    };
-    let ctx_id = match required_str(args, "context_id") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    // Both workspace and share contexts use the same form contract: a single
-    // `files` field whose value is a JSON-array string of file IDs (NOT a
-    // `nodes` CSV). Accept the IDs from either `files` or the legacy
-    // `node_ids` arg for back-compat. `files` may be either a CSV string or a
-    // JSON-array string (e.g. `["id1","id2"]`); both are accepted.
-    let Some(ids_str) = optional_str(args, "files").or_else(|| optional_str(args, "node_ids"))
-    else {
-        return Ok(error_text(
-            "share-generate requires `files` (comma-separated or JSON-array of file IDs)",
-        ));
-    };
-    let trimmed = ids_str.trim();
-    let file_ids: Vec<String> = if trimmed.starts_with('[') {
-        match serde_json::from_str::<Vec<String>>(trimmed) {
-            Ok(v) => v
-                .into_iter()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            Err(e) => {
-                return Ok(error_text(&format!(
-                    "share-generate `files` looked like a JSON array but failed to parse: {e}"
-                )));
-            }
-        }
-    } else {
-        trimmed
-            .split(',')
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-    if file_ids.is_empty() {
-        return Ok(error_text("share-generate requires at least one file ID"));
-    }
-    // The `/ai/share/` endpoint caps `files` at 1-25 per the docs; reject
-    // oversized requests before the network round-trip.
-    if file_ids.len() > 25 {
-        return Ok(error_text(&format!(
-            "too many files: {} supplied, but AI share accepts at most 25",
-            file_ids.len()
-        )));
-    }
-    let form = api::ai::build_share_form(&file_ids);
-    match api::ai::ai_api_form(&client, ctx_type, ctx_id, "share/", &form).await {
-        Ok(v) => Ok(success_json(&v)),
         Err(e) => Ok(cli_err_to_result(&e)),
     }
 }
@@ -15717,16 +15642,6 @@ mod ripley_tool_tests {
         );
     }
 
-    #[test]
-    fn share_form_helper_builds_files_json_array() {
-        // The MCP share-generate handler delegates to this shared builder;
-        // confirm the body shape it produces is the JSON `files` array.
-        let form = super::api::ai::build_share_form(&["x".to_owned(), "y".to_owned()]);
-        assert_eq!(form.get("files").map(String::as_str), Some(r#"["x","y"]"#));
-        assert!(!form.contains_key("nodes"));
-        let _ = json!({}); // silence unused import if other asserts change
-    }
-
     #[tokio::test]
     async fn ai_chat_create_without_question_errors() {
         // The API docs make `question` required for create; the handler must
@@ -15744,58 +15659,6 @@ mod ripley_tool_tests {
         assert!(
             text.contains("query_text"),
             "create without question must surface a missing query_text error, got: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn ai_share_generate_rejects_more_than_25_files() {
-        // The API docs cap `files` at 1-25; the handler must reject >25
-        // client-side before the network round-trip.
-        let router = authed_router().await;
-        let ids: Vec<String> = (0..26).map(|i| format!("id{i}")).collect();
-        let mut args = Map::new();
-        args.insert(
-            "action".to_owned(),
-            Value::String("share-generate".to_owned()),
-        );
-        args.insert("context_id".to_owned(), Value::String("ws1".to_owned()));
-        args.insert("files".to_owned(), Value::String(ids.join(",")));
-        let res = router
-            .call_tool("ripley", args)
-            .await
-            .expect("call_tool ok");
-        let text = result_to_string(&res);
-        assert!(
-            text.contains("too many files") && text.contains("25"),
-            "share-generate with 26 files must be rejected, got: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn ai_share_generate_accepts_json_array_files() {
-        // `files` may be a JSON-array string; confirm it parses (a single id
-        // is well under the cap, so this passes validation and proceeds to the
-        // network attempt — which then fails, but NOT with a parse/validation
-        // error).
-        let router = authed_router().await;
-        let mut args = Map::new();
-        args.insert(
-            "action".to_owned(),
-            Value::String("share-generate".to_owned()),
-        );
-        args.insert("context_id".to_owned(), Value::String("ws1".to_owned()));
-        args.insert(
-            "files".to_owned(),
-            Value::String(r#"["abc","def"]"#.to_owned()),
-        );
-        let res = router
-            .call_tool("ripley", args)
-            .await
-            .expect("call_tool ok");
-        let text = result_to_string(&res);
-        assert!(
-            !text.contains("failed to parse") && !text.contains("at least one file ID"),
-            "JSON-array files should parse cleanly, got: {text}"
         );
     }
 
@@ -15833,12 +15696,10 @@ mod ripley_tool_tests {
             .find(|t| t.name.as_ref() == "ripley")
             .expect("ripley tool present");
         let schema = serde_json::to_string(&ripley.input_schema).unwrap_or_default();
-        for action in ["ask", "share-generate"] {
-            assert!(
-                schema.contains(action),
-                "ripley schema must advertise the `{action}` action, got: {schema}"
-            );
-        }
+        assert!(
+            schema.contains("ask"),
+            "ripley schema must advertise the `ask` action, got: {schema}"
+        );
         // The retired self-only AI-memory actions must NOT be advertised —
         // agent memory was removed from public API access.
         for retired in ["memory-get", "memory-set", "memory-delete"] {
@@ -15862,6 +15723,13 @@ mod ripley_tool_tests {
             !actions.contains(&"search"),
             "ripley must NOT advertise `search` — searching moved to the \
              dedicated `search` tool, got: {actions:?}"
+        );
+        // `share-generate` was retired with the AI Share link endpoint.
+        // Checked against the action list for the same reason as `search`.
+        assert!(
+            !actions.contains(&"share-generate"),
+            "ripley must NOT advertise the retired `share-generate` action, \
+             got: {actions:?}"
         );
     }
 
@@ -16115,6 +15983,10 @@ mod ripley_tool_tests {
         // which covers BOTH the workspace and share contexts this action used
         // to serve.
         "search",
+        // `share-generate` — removed 2026-11-17 with the AI Share link
+        // endpoint (`POST /{workspace,share}/{id}/ai/share/`), which the
+        // platform is retiring. There is no successor action.
+        "share-generate",
     ];
 
     fn metadata_tool_actions() -> Vec<&'static str> {
