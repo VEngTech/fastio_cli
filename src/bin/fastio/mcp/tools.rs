@@ -851,26 +851,6 @@ const TOOL_DEFS: &[ToolDef] = &[
             ("description", "Org description", false),
             ("industry", "Industry", false),
             ("billing_email", "Billing email", false),
-            ("homepage_url", "Homepage URL", false),
-            (
-                "background_color",
-                "Org background color as JSON string (update)",
-                false,
-            ),
-            (
-                "background_mode",
-                "Org background display mode (update)",
-                false,
-            ),
-            (
-                "use_background",
-                "Enable/disable the org brand background — boolean (update)",
-                false,
-            ),
-            ("facebook_url", "Facebook profile URL (update)", false),
-            ("twitter_url", "Twitter/X profile URL (update)", false),
-            ("instagram_url", "Instagram profile URL (update)", false),
-            ("youtube_url", "YouTube channel URL (update)", false),
             (
                 "perm_authorized_domains",
                 "Authorized email domain for auto-join (update)",
@@ -968,7 +948,6 @@ const TOOL_DEFS: &[ToolDef] = &[
                 "Automatic metadata extraction for newly uploaded files (create-workspace) — boolean (true/false). An OPT-OUT layered under `deep_indexing`: OMIT to take the platform default, which is ON, and send false to withhold automatic extraction. It can never enable extraction where `deep_indexing` or the plan does not allow it, and it does not affect explicit per-file extraction requests (the `metadata` tool's extract actions).",
                 false,
             ),
-            ("accent_color", "Accent color (create-workspace)", false),
             (
                 "background_color1",
                 "Background color 1 (create-workspace)",
@@ -1045,11 +1024,6 @@ const TOOL_DEFS: &[ToolDef] = &[
             (
                 "perm_member_manage",
                 "Who can manage members — permission phrase (update)",
-                false,
-            ),
-            (
-                "accent_color",
-                "Accent color as JSON string (update)",
                 false,
             ),
             (
@@ -3664,6 +3638,52 @@ fn reject_undeclared_auth_args(args: &Map<String, Value>) -> Result<(), CallTool
     Ok(())
 }
 
+/// Org branding keys the `org` tool's `update` action refuses: the retired
+/// API field names, plus the spellings this server previously advertised.
+const RETIRED_ORG_UPDATE_ARGS: &[&str] = &[
+    "accent_color",
+    "background_color",
+    "background_mode",
+    "use_background",
+    "facebook",
+    "twitter",
+    "instagram",
+    "youtube",
+    "homepage",
+    "homepage_url",
+    "facebook_url",
+    "twitter_url",
+    "instagram_url",
+    "youtube_url",
+];
+
+/// Workspace branding keys refused by `org` `create-workspace` and
+/// `workspace` `update`.
+const RETIRED_WORKSPACE_ARGS: &[&str] = &["accent_color"];
+
+/// Refuse any `retired` key present in `args`, whatever its value.
+///
+/// These fields can no longer be set, so ignoring them would report success
+/// for a change that never happened. Every present key is named, in the order
+/// of `retired`.
+fn reject_retired_args(args: &Map<String, Value>, retired: &[&str]) -> Result<(), CallToolResult> {
+    let present: Vec<String> = retired
+        .iter()
+        .filter(|key| args.contains_key(**key))
+        .map(|key| format!("'{key}'"))
+        .collect();
+    match present.as_slice() {
+        [] => Ok(()),
+        [one] => Err(error_text(&format!(
+            "The field {one} is retired and can no longer be set."
+        ))),
+        many => Err(error_text(&format!(
+            "The fields {} are retired and can no longer be set.",
+            many.join(", ")
+        ))),
+    }
+}
+
 /// Rewrite a shared-resolver message for the MCP surface.
 ///
 /// [`api::auth::resolve_key_scopes`] phrases its refusals in CLI flag
@@ -5168,6 +5188,9 @@ async fn handle_org_update(
     state: &McpState,
     args: &Map<String, Value>,
 ) -> Result<CallToolResult, McpError> {
+    if let Err(e) = reject_retired_args(args, RETIRED_ORG_UPDATE_ARGS) {
+        return Ok(e);
+    }
     let client = state.client().read().await;
     let org_id = match required_str(args, "org_id") {
         Ok(v) => v,
@@ -5182,15 +5205,6 @@ async fn handle_org_update(
             description: optional_str(args, "description"),
             industry: optional_str(args, "industry"),
             billing_email: optional_str(args, "billing_email"),
-            homepage_url: optional_str(args, "homepage_url"),
-            accent_color: optional_str(args, "accent_color"),
-            background_color: optional_str(args, "background_color"),
-            background_mode: optional_str(args, "background_mode"),
-            use_background: optional_bool(args, "use_background"),
-            facebook_url: optional_str(args, "facebook_url"),
-            twitter_url: optional_str(args, "twitter_url"),
-            instagram_url: optional_str(args, "instagram_url"),
-            youtube_url: optional_str(args, "youtube_url"),
             perm_member_manage: optional_str(args, "perm_member_manage"),
             perm_authorized_domains: optional_str(args, "perm_authorized_domains"),
             owner_defined: optional_str(args, "owner_defined"),
@@ -5911,6 +5925,9 @@ async fn handle_org_create_workspace(
     state: &McpState,
     args: &Map<String, Value>,
 ) -> Result<CallToolResult, McpError> {
+    if let Err(e) = reject_retired_args(args, RETIRED_WORKSPACE_ARGS) {
+        return Ok(e);
+    }
     let client = state.client().read().await;
     let org_id = match required_str(args, "org_id") {
         Ok(v) => v,
@@ -5958,7 +5975,6 @@ async fn handle_org_create_workspace(
             Err(e) => return Ok(e),
         },
         description: optional_str(args, "description"),
-        accent_color: optional_str(args, "accent_color"),
         background_color1: optional_str(args, "background_color1"),
         background_color2: optional_str(args, "background_color2"),
     };
@@ -5999,9 +6015,6 @@ fn build_workspace_update_fields(
     }
     if let Some(v) = optional_str(args, "perm_member_manage") {
         fields.insert("perm_member_manage".to_owned(), v.to_owned());
-    }
-    if let Some(v) = optional_str(args, "accent_color") {
-        fields.insert("accent_color".to_owned(), v.to_owned());
     }
     if let Some(v) = optional_str(args, "background_color1") {
         fields.insert("background_color1".to_owned(), v.to_owned());
@@ -6416,6 +6429,9 @@ async fn handle_workspace(
             }
         }
         "update" => {
+            if let Err(e) = reject_retired_args(args, RETIRED_WORKSPACE_ARGS) {
+                return Ok(e);
+            }
             let ws_id = match required_str(args, "workspace_id") {
                 Ok(v) => v,
                 Err(e) => return Ok(e),
@@ -16286,6 +16302,149 @@ mod ripley_tool_tests {
         assert!(
             !super::build_workspace_update_fields(&Map::new()).contains_key("metadata_extraction"),
             "unset `metadata_extraction` must be omitted from the update form"
+        );
+    }
+
+    /// Call `tool`/`action` on the dead-port router with `extra` args.
+    async fn call_with(tool: &str, action: &str, extra: &[(&str, Value)]) -> String {
+        let router = authed_router().await;
+        let mut args = Map::new();
+        args.insert("action".to_owned(), Value::String(action.to_owned()));
+        for (key, value) in extra {
+            args.insert((*key).to_owned(), value.clone());
+        }
+        let res = router.call_tool(tool, args).await.expect("call_tool ok");
+        assert_eq!(res.is_error, Some(true), "{tool} {action} must be refused");
+        result_to_string(&res)
+    }
+
+    #[tokio::test]
+    async fn org_update_refuses_one_retired_key() {
+        let text = call_with(
+            "org",
+            "update",
+            &[
+                ("org_id", json!("1234567890123456789")),
+                ("accent_color", json!("#ff0000")),
+            ],
+        )
+        .await;
+        assert!(
+            text.contains("The field 'accent_color' is retired and can no longer be set."),
+            "got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_update_names_every_retired_key() {
+        let text = call_with(
+            "org",
+            "update",
+            &[
+                ("org_id", json!("1234567890123456789")),
+                ("homepage", json!("https://example.com")),
+                ("background_mode", json!("fill")),
+                ("accent_color", json!("#ff0000")),
+            ],
+        )
+        .await;
+        assert!(
+            text.contains(
+                "The fields 'accent_color', 'background_mode', 'homepage' are retired \
+                 and can no longer be set."
+            ),
+            "got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_update_refuses_old_url_spelling() {
+        let text = call_with(
+            "org",
+            "update",
+            &[
+                ("org_id", json!("1234567890123456789")),
+                ("twitter_url", json!("https://example.com/x")),
+            ],
+        )
+        .await;
+        assert!(text.contains("'twitter_url' is retired"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn org_update_refuses_retired_key_on_presence() {
+        for value in [json!(false), Value::Null, json!("")] {
+            let text = call_with(
+                "org",
+                "update",
+                &[
+                    ("org_id", json!("1234567890123456789")),
+                    ("use_background", value.clone()),
+                ],
+            )
+            .await;
+            assert!(
+                text.contains("'use_background' is retired"),
+                "value {value} must still be refused, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn retired_guard_passes_valid_args() {
+        let mut org = Map::new();
+        org.insert("org_id".to_owned(), json!("1234567890123456789"));
+        org.insert("name".to_owned(), json!("Renamed"));
+        assert!(super::reject_retired_args(&org, super::RETIRED_ORG_UPDATE_ARGS).is_ok());
+
+        let mut ws = Map::new();
+        ws.insert("background_color1".to_owned(), json!("#000000"));
+        ws.insert("background_color2".to_owned(), json!("#ffffff"));
+        assert!(super::reject_retired_args(&ws, super::RETIRED_WORKSPACE_ARGS).is_ok());
+        let fields = super::build_workspace_update_fields(&ws);
+        assert_eq!(
+            fields.get("background_color1").map(String::as_str),
+            Some("#000000")
+        );
+        assert_eq!(
+            fields.get("background_color2").map(String::as_str),
+            Some("#ffffff")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_update_refuses_accent_color() {
+        let text = call_with(
+            "workspace",
+            "update",
+            &[
+                ("workspace_id", json!("1234567890123456789")),
+                ("background_color1", json!("#000000")),
+                ("accent_color", json!("#ff0000")),
+            ],
+        )
+        .await;
+        assert!(
+            text.contains("The field 'accent_color' is retired and can no longer be set."),
+            "got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_create_workspace_refuses_accent_color() {
+        let text = call_with(
+            "org",
+            "create-workspace",
+            &[
+                ("org_id", json!("1234567890123456789")),
+                ("name", json!("New")),
+                ("accent_color", json!("#ff0000")),
+            ],
+        )
+        .await;
+        assert!(
+            text.contains("The field 'accent_color' is retired and can no longer be set."),
+            "got: {text}"
         );
     }
 
