@@ -70,9 +70,8 @@ pub async fn get_org(client: &ApiClient, org_id: &str) -> Result<Value, CliError
 ///
 /// Every field is optional; only `Some` values are sent. To clear a clearable
 /// field, pass the literal string `"null"` (or `""` where the contract allows),
-/// matching the server's clear-to-null convention. The brand-color and
-/// `owner_defined` fields are JSON-encoded strings forwarded to the server
-/// verbatim.
+/// matching the server's clear-to-null convention. The `owner_defined` field
+/// is a JSON-encoded string forwarded to the server verbatim.
 pub struct UpdateOrgParams<'a> {
     /// Organization to update.
     pub org_id: &'a str,
@@ -93,24 +92,6 @@ pub struct UpdateOrgParams<'a> {
     pub industry: Option<&'a str>,
     /// Email address for billing notifications.
     pub billing_email: Option<&'a str>,
-    /// Organization homepage URL.
-    pub homepage_url: Option<&'a str>,
-    /// Brand accent color as a JSON-encoded string.
-    pub accent_color: Option<&'a str>,
-    /// Background color as a JSON-encoded string.
-    pub background_color: Option<&'a str>,
-    /// Background display mode (server-validated against its closed set).
-    pub background_mode: Option<&'a str>,
-    /// Enable/disable the brand background.
-    pub use_background: Option<bool>,
-    /// Facebook profile URL.
-    pub facebook_url: Option<&'a str>,
-    /// Twitter/X profile URL.
-    pub twitter_url: Option<&'a str>,
-    /// Instagram profile URL.
-    pub instagram_url: Option<&'a str>,
-    /// `YouTube` channel URL.
-    pub youtube_url: Option<&'a str>,
     /// Member-management permission level.
     pub perm_member_manage: Option<&'a str>,
     /// Authorized email domain for auto-join.
@@ -148,36 +129,6 @@ fn update_org_form(params: &UpdateOrgParams<'_>) -> HashMap<String, String> {
     }
     if let Some(v) = params.billing_email {
         form.insert("billing_email".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.homepage_url {
-        form.insert("homepage".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.accent_color {
-        form.insert("accent_color".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.background_color {
-        form.insert("background_color".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.background_mode {
-        form.insert("background_mode".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.use_background {
-        form.insert(
-            "use_background".to_owned(),
-            if v { "true" } else { "false" }.to_owned(),
-        );
-    }
-    if let Some(v) = params.facebook_url {
-        form.insert("facebook".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.twitter_url {
-        form.insert("twitter".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.instagram_url {
-        form.insert("instagram".to_owned(), v.to_owned());
-    }
-    if let Some(v) = params.youtube_url {
-        form.insert("youtube".to_owned(), v.to_owned());
     }
     if let Some(v) = params.perm_member_manage {
         form.insert("perm_member_manage".to_owned(), v.to_owned());
@@ -926,8 +877,6 @@ pub struct CreateWorkspaceParams<'a> {
     pub metadata_extraction: Option<bool>,
     /// Optional workspace description.
     pub description: Option<&'a str>,
-    /// Optional accent color.
-    pub accent_color: Option<&'a str>,
     /// Optional background color 1.
     pub background_color1: Option<&'a str>,
     /// Optional background color 2.
@@ -957,9 +906,6 @@ fn build_create_workspace_form(params: &CreateWorkspaceParams<'_>) -> HashMap<St
     if let Some(d) = params.description {
         form.insert("description".to_owned(), d.to_owned());
     }
-    if let Some(c) = params.accent_color {
-        form.insert("accent_color".to_owned(), c.to_owned());
-    }
     if let Some(c) = params.background_color1 {
         form.insert("background_color1".to_owned(), c.to_owned());
     }
@@ -974,7 +920,7 @@ fn build_create_workspace_form(params: &CreateWorkspaceParams<'_>) -> HashMap<St
 /// `POST /org/{org_id}/create/workspace/` — `org_id` is a URL **path** segment
 /// (not a body field). The required body fields are `folder_name`, `name`,
 /// `perm_join` and `perm_member_manage`; Deep Indexing, `description` and the
-/// three color fields are optional. (The legacy flat `POST /workspace/create/`
+/// `background_color1` / `background_color2` fields are optional. (The legacy flat `POST /workspace/create/`
 /// route is gone.)
 pub async fn create_workspace(
     client: &ApiClient,
@@ -1008,7 +954,6 @@ mod tests {
             deep_indexing,
             metadata_extraction: None,
             description: None,
-            accent_color: None,
             background_color1: None,
             background_color2: None,
         }
@@ -1093,15 +1038,6 @@ mod tests {
             description: None,
             industry: None,
             billing_email: None,
-            homepage_url: None,
-            accent_color: None,
-            background_color: None,
-            background_mode: None,
-            use_background: None,
-            facebook_url: None,
-            twitter_url: None,
-            instagram_url: None,
-            youtube_url: None,
             perm_member_manage: None,
             perm_authorized_domains: None,
             owner_defined: None,
@@ -1114,68 +1050,11 @@ mod tests {
     }
 
     #[test]
-    fn update_org_form_branding_and_social_wire_keys() {
-        let mut p = empty_update_params("19");
-        p.accent_color = Some(r#"{"r":1}"#);
-        p.background_color = Some(r#"{"g":2}"#);
-        p.background_mode = Some("cover");
-        p.use_background = Some(true);
-        p.homepage_url = Some("https://example.com");
-        p.facebook_url = Some("https://fb.com/x");
-        p.twitter_url = Some("https://x.com/x");
-        p.instagram_url = Some("https://ig.com/x");
-        p.youtube_url = Some("https://yt.com/x");
-        let f = update_org_form(&p);
-        assert_eq!(
-            f.get("accent_color").map(String::as_str),
-            Some(r#"{"r":1}"#)
-        );
-        // Homepage wire key is the SHORT backend constant
-        // (`Org\KEY_HOMEPAGE_URL = 'homepage'`), not `homepage_url`.
-        assert_eq!(
-            f.get("homepage").map(String::as_str),
-            Some("https://example.com")
-        );
-        assert!(!f.contains_key("homepage_url"));
-        assert_eq!(
-            f.get("background_color").map(String::as_str),
-            Some(r#"{"g":2}"#)
-        );
-        assert_eq!(f.get("background_mode").map(String::as_str), Some("cover"));
-        // bool → "true"/"false" string.
-        assert_eq!(f.get("use_background").map(String::as_str), Some("true"));
-        // Social wire keys are the SHORT backend `Org\KEY_*` constant values
-        // (`facebook`/`twitter`/`instagram`/`youtube`), not the `*_url` flag names.
-        assert_eq!(
-            f.get("facebook").map(String::as_str),
-            Some("https://fb.com/x")
-        );
-        assert_eq!(
-            f.get("twitter").map(String::as_str),
-            Some("https://x.com/x")
-        );
-        assert_eq!(
-            f.get("instagram").map(String::as_str),
-            Some("https://ig.com/x")
-        );
-        assert_eq!(
-            f.get("youtube").map(String::as_str),
-            Some("https://yt.com/x")
-        );
-        // Long flag-style keys must NOT be sent (would be a silent no-op).
-        assert!(!f.contains_key("facebook_url"));
-        assert!(!f.contains_key("twitter_url"));
-        assert!(!f.contains_key("instagram_url"));
-        assert!(!f.contains_key("youtube_url"));
-    }
-
-    #[test]
     fn update_org_form_perm_and_owner_defined_wire_keys() {
         let mut p = empty_update_params("19");
         p.perm_member_manage = Some("Admin or above");
         p.perm_authorized_domains = Some("example.com");
         p.owner_defined = Some(r#"{"k":"v"}"#);
-        p.use_background = Some(false);
         let f = update_org_form(&p);
         assert_eq!(
             f.get("perm_member_manage").map(String::as_str),
@@ -1192,7 +1071,6 @@ mod tests {
             f.get("owner_defined").map(String::as_str),
             Some(r#"{"k":"v"}"#)
         );
-        assert_eq!(f.get("use_background").map(String::as_str), Some("false"));
     }
 
     // ─── path builders ──────────────────────────────────────────────────────

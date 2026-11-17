@@ -1996,33 +1996,6 @@ pub enum OrgCommands {
         /// Billing email.
         #[arg(long)]
         billing_email: Option<String>,
-        /// Homepage URL.
-        #[arg(long)]
-        homepage_url: Option<String>,
-        /// Brand accent color as a JSON string (pass `null` to clear).
-        #[arg(long)]
-        accent_color: Option<String>,
-        /// Background color as a JSON string (pass `null` to clear).
-        #[arg(long)]
-        background_color: Option<String>,
-        /// Background display mode.
-        #[arg(long)]
-        background_mode: Option<String>,
-        /// Enable or disable the brand background.
-        #[arg(long)]
-        use_background: Option<bool>,
-        /// Facebook profile URL.
-        #[arg(long)]
-        facebook_url: Option<String>,
-        /// Twitter/X profile URL.
-        #[arg(long)]
-        twitter_url: Option<String>,
-        /// Instagram profile URL.
-        #[arg(long)]
-        instagram_url: Option<String>,
-        /// `YouTube` channel URL.
-        #[arg(long)]
-        youtube_url: Option<String>,
         /// Member-management permission level.
         #[arg(long)]
         perm_member_manage: Option<String>,
@@ -2235,15 +2208,6 @@ impl fmt::Debug for OrgCommands {
                 description,
                 industry,
                 billing_email,
-                homepage_url,
-                accent_color,
-                background_color,
-                background_mode,
-                use_background,
-                facebook_url,
-                twitter_url,
-                instagram_url,
-                youtube_url,
                 perm_member_manage,
                 perm_authorized_domains,
                 owner_defined,
@@ -2255,15 +2219,6 @@ impl fmt::Debug for OrgCommands {
                 .field("description", description)
                 .field("industry", industry)
                 .field("billing_email", billing_email)
-                .field("homepage_url", homepage_url)
-                .field("accent_color", accent_color)
-                .field("background_color", background_color)
-                .field("background_mode", background_mode)
-                .field("use_background", use_background)
-                .field("facebook_url", facebook_url)
-                .field("twitter_url", twitter_url)
-                .field("instagram_url", instagram_url)
-                .field("youtube_url", youtube_url)
                 .field("perm_member_manage", perm_member_manage)
                 .field("perm_authorized_domains", perm_authorized_domains)
                 .field("owner_defined", owner_defined)
@@ -2708,9 +2663,6 @@ pub enum WorkspaceCommands {
         /// Who can manage members (permission phrase).
         #[arg(long)]
         perm_member_manage: Option<String>,
-        /// Brand accent color as a JSON string (pass `null` to clear).
-        #[arg(long)]
-        accent_color: Option<String>,
         /// Primary background color as a JSON string (pass `null` to clear).
         #[arg(long)]
         background_color1: Option<String>,

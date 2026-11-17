@@ -63,8 +63,6 @@ pub enum WorkspaceCommand {
         perm_join: Option<String>,
         /// Who can manage members (permission phrase).
         perm_member_manage: Option<String>,
-        /// Brand accent color (JSON-encoded string).
-        accent_color: Option<String>,
         /// Primary background color (JSON-encoded string).
         background_color1: Option<String>,
         /// Secondary background color (JSON-encoded string).
@@ -142,7 +140,6 @@ pub async fn execute(command: &WorkspaceCommand, ctx: &CommandContext<'_>) -> Re
             metadata_extraction,
             perm_join,
             perm_member_manage,
-            accent_color,
             background_color1,
             background_color2,
             owner_defined,
@@ -158,7 +155,6 @@ pub async fn execute(command: &WorkspaceCommand, ctx: &CommandContext<'_>) -> Re
                     metadata_extraction: *metadata_extraction,
                     perm_join: perm_join.as_deref(),
                     perm_member_manage: perm_member_manage.as_deref(),
-                    accent_color: accent_color.as_deref(),
                     background_color1: background_color1.as_deref(),
                     background_color2: background_color2.as_deref(),
                     owner_defined: owner_defined.as_deref(),
@@ -257,8 +253,6 @@ struct WorkspaceUpdate<'a> {
     perm_join: Option<&'a str>,
     /// Who can manage members (permission phrase).
     perm_member_manage: Option<&'a str>,
-    /// Brand accent color (JSON-encoded string).
-    accent_color: Option<&'a str>,
     /// Primary background color (JSON-encoded string).
     background_color1: Option<&'a str>,
     /// Secondary background color (JSON-encoded string).
@@ -277,7 +271,6 @@ impl WorkspaceUpdate<'_> {
             && self.metadata_extraction.is_none()
             && self.perm_join.is_none()
             && self.perm_member_manage.is_none()
-            && self.accent_color.is_none()
             && self.background_color1.is_none()
             && self.background_color2.is_none()
             && self.owner_defined.is_none()
@@ -313,9 +306,6 @@ fn build_workspace_update_fields(u: &WorkspaceUpdate<'_>) -> HashMap<String, Str
     if let Some(v) = u.perm_member_manage {
         fields.insert("perm_member_manage".to_owned(), v.to_owned());
     }
-    if let Some(v) = u.accent_color {
-        fields.insert("accent_color".to_owned(), v.to_owned());
-    }
     if let Some(v) = u.background_color1 {
         fields.insert("background_color1".to_owned(), v.to_owned());
     }
@@ -336,7 +326,7 @@ async fn update(
 ) -> Result<()> {
     anyhow::ensure!(
         !u.is_empty(),
-        "at least one update field is required (e.g. --name, --description, --perm-join, --accent-color, …)"
+        "at least one update field is required (e.g. --name, --description, --perm-join, …)"
     );
 
     let fields = build_workspace_update_fields(u);
@@ -460,7 +450,6 @@ mod tests {
         let fields = build_workspace_update_fields(&WorkspaceUpdate {
             perm_join: Some("Member or above"),
             perm_member_manage: Some("Admin or above"),
-            accent_color: Some(r#"{"r":1}"#),
             background_color1: Some(r#"{"g":2}"#),
             background_color2: Some(r#"{"b":3}"#),
             owner_defined: Some(r#"{"k":"v"}"#),
@@ -473,10 +462,6 @@ mod tests {
         assert_eq!(
             fields.get("perm_member_manage").map(String::as_str),
             Some("Admin or above")
-        );
-        assert_eq!(
-            fields.get("accent_color").map(String::as_str),
-            Some(r#"{"r":1}"#)
         );
         assert_eq!(
             fields.get("background_color1").map(String::as_str),

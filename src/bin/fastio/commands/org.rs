@@ -52,24 +52,6 @@ pub enum OrgCommand {
         industry: Option<String>,
         /// Billing email.
         billing_email: Option<String>,
-        /// Homepage URL.
-        homepage_url: Option<String>,
-        /// Brand accent color (JSON-encoded string).
-        accent_color: Option<String>,
-        /// Background color (JSON-encoded string).
-        background_color: Option<String>,
-        /// Background display mode.
-        background_mode: Option<String>,
-        /// Enable/disable the brand background.
-        use_background: Option<bool>,
-        /// Facebook profile URL.
-        facebook_url: Option<String>,
-        /// Twitter/X profile URL.
-        twitter_url: Option<String>,
-        /// Instagram profile URL.
-        instagram_url: Option<String>,
-        /// `YouTube` channel URL.
-        youtube_url: Option<String>,
         /// Member-management permission level.
         perm_member_manage: Option<String>,
         /// Authorized email domain for auto-join.
@@ -491,15 +473,6 @@ pub async fn execute(command: &OrgCommand, ctx: &CommandContext<'_>) -> Result<(
             description,
             industry,
             billing_email,
-            homepage_url,
-            accent_color,
-            background_color,
-            background_mode,
-            use_background,
-            facebook_url,
-            twitter_url,
-            instagram_url,
-            youtube_url,
             perm_member_manage,
             perm_authorized_domains,
             owner_defined,
@@ -513,15 +486,6 @@ pub async fn execute(command: &OrgCommand, ctx: &CommandContext<'_>) -> Result<(
                     description: description.as_deref(),
                     industry: industry.as_deref(),
                     billing_email: billing_email.as_deref(),
-                    homepage_url: homepage_url.as_deref(),
-                    accent_color: accent_color.as_deref(),
-                    background_color: background_color.as_deref(),
-                    background_mode: background_mode.as_deref(),
-                    use_background: *use_background,
-                    facebook_url: facebook_url.as_deref(),
-                    twitter_url: twitter_url.as_deref(),
-                    instagram_url: instagram_url.as_deref(),
-                    youtube_url: youtube_url.as_deref(),
                     perm_member_manage: perm_member_manage.as_deref(),
                     perm_authorized_domains: perm_authorized_domains.as_deref(),
                     owner_defined: owner_defined.as_deref(),
@@ -626,21 +590,12 @@ async fn update(ctx: &CommandContext<'_>, params: &api::org::UpdateOrgParams<'_>
         || params.description.is_some()
         || params.industry.is_some()
         || params.billing_email.is_some()
-        || params.homepage_url.is_some()
-        || params.accent_color.is_some()
-        || params.background_color.is_some()
-        || params.background_mode.is_some()
-        || params.use_background.is_some()
-        || params.facebook_url.is_some()
-        || params.twitter_url.is_some()
-        || params.instagram_url.is_some()
-        || params.youtube_url.is_some()
         || params.perm_member_manage.is_some()
         || params.perm_authorized_domains.is_some()
         || params.owner_defined.is_some();
     anyhow::ensure!(
         has_field,
-        "at least one update field is required (e.g. --name, --domain, --description, --accent-color, --perm-member-manage, …)"
+        "at least one update field is required (e.g. --name, --domain, --description, --perm-member-manage, …)"
     );
 
     let client = ctx.build_client()?;
@@ -1506,7 +1461,6 @@ async fn create_workspace(
         deep_indexing,
         metadata_extraction,
         description,
-        accent_color: None,
         background_color1: None,
         background_color2: None,
     };
