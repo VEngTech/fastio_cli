@@ -4093,9 +4093,6 @@ pub enum ShareCommands {
         /// Name for the new backing folder (with --create-folder).
         #[arg(long)]
         folder_name: Option<String>,
-        /// URL-friendly custom name (auto-generated when omitted).
-        #[arg(long)]
-        custom_name: Option<String>,
         /// Password for share access (Send + 'Anyone with the link' only).
         #[arg(long)]
         password: Option<String>,
@@ -4166,9 +4163,6 @@ pub enum ShareCommands {
         /// New display title (2-80 chars), or "null" to clear.
         #[arg(long)]
         title: Option<String>,
-        /// New URL-friendly custom name, or "null" to clear.
-        #[arg(long)]
-        custom_name: Option<String>,
         /// New description, or "null"/"" to clear.
         #[arg(long)]
         description: Option<String>,
@@ -4280,11 +4274,6 @@ pub enum ShareCommands {
     },
     /// List available shares for the current user.
     Available,
-    /// Check if a share name is available.
-    CheckName {
-        /// Share name to check.
-        name: String,
-    },
     /// Share file operations.
     #[command(subcommand)]
     Files(ShareFilesCommands),
@@ -4333,7 +4322,6 @@ impl fmt::Debug for ShareCommands {
                 folder_node_id,
                 create_folder,
                 folder_name,
-                custom_name,
                 password,
                 expires,
                 notify,
@@ -4364,7 +4352,6 @@ impl fmt::Debug for ShareCommands {
                 .field("folder_node_id", folder_node_id)
                 .field("create_folder", create_folder)
                 .field("folder_name", folder_name)
-                .field("custom_name", custom_name)
                 .field("password", &format_args!("{}", pw(password.as_ref())))
                 .field("expires", expires)
                 .field("notify", notify)
@@ -4389,7 +4376,6 @@ impl fmt::Debug for ShareCommands {
                 share_id,
                 name,
                 title,
-                custom_name,
                 description,
                 share_type,
                 access_options,
@@ -4419,7 +4405,6 @@ impl fmt::Debug for ShareCommands {
                 .field("share_id", share_id)
                 .field("name", name)
                 .field("title", title)
-                .field("custom_name", custom_name)
                 .field("description", description)
                 .field("share_type", share_type)
                 .field("access_options", access_options)
@@ -4472,7 +4457,6 @@ impl fmt::Debug for ShareCommands {
                 .field("share_id", share_id)
                 .finish(),
             Self::Available => write!(f, "Available"),
-            Self::CheckName { name } => f.debug_struct("CheckName").field("name", name).finish(),
             Self::Files(c) => f.debug_tuple("Files").field(c).finish(),
             Self::Members(c) => f.debug_tuple("Members").field(c).finish(),
             Self::Invitation(c) => f.debug_tuple("Invitation").field(c).finish(),
@@ -9536,6 +9520,61 @@ mod share_debug_tests {
         // A present-vs-absent distinction is still legible on the Options.
         let none = parse(&["fastio", "share", "update", "sh1", "--title", "New"]);
         assert!(format!("{none:?}").contains("None"));
+    }
+}
+
+#[cfg(test)]
+mod share_custom_name_tests {
+    use super::Cli;
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    /// The error KIND clap reports for `argv`, or `None` if it parsed.
+    fn parse_error_kind(argv: &[&str]) -> Option<ErrorKind> {
+        Cli::try_parse_from(argv).err().map(|e| e.kind())
+    }
+
+    #[test]
+    fn share_create_and_update_reject_custom_name() {
+        // Custom share names can no longer be set. Assert the KIND so the test
+        // cannot pass for an unrelated reason (e.g. a renamed `--workspace`).
+        assert_eq!(
+            parse_error_kind(&[
+                "fastio",
+                "share",
+                "create",
+                "n",
+                "--workspace",
+                "1",
+                "--custom-name",
+                "x",
+            ]),
+            Some(ErrorKind::UnknownArgument),
+            "`share create --custom-name` must be an unknown argument"
+        );
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "update", "sh1", "--custom-name", "x"]),
+            Some(ErrorKind::UnknownArgument),
+            "`share update --custom-name` must be an unknown argument"
+        );
+        // Positive controls: the same argv without the flag still parses.
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "create", "n", "--workspace", "1"]),
+            None
+        );
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "update", "sh1", "--title", "T"]),
+            None
+        );
+    }
+
+    #[test]
+    fn share_check_name_is_an_unknown_subcommand() {
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "check-name", "x"]),
+            Some(ErrorKind::InvalidSubcommand),
+            "`share check-name` was retired and must be an unknown subcommand"
+        );
     }
 }
 

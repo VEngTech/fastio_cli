@@ -1663,7 +1663,6 @@ const TOOL_DEFS: &[ToolDef] = &[
             "password-auth",
             "guest-auth",
             "available",
-            "check-name",
             // Universal: every tool self-describes. Declared so a STRICT
             // client will actually send it — the router has always accepted
             // it, but a schema that omits it makes the call look invalid.
@@ -1678,11 +1677,6 @@ const TOOL_DEFS: &[ToolDef] = &[
                 false,
             ),
             ("title", "Display title (update); \"null\" to clear", false),
-            (
-                "custom_name",
-                "URL-friendly custom name (create/update); \"null\" to clear",
-                false,
-            ),
             (
                 "share_type",
                 "Direction: send, receive, exchange (create default exchange)",
@@ -8763,7 +8757,6 @@ async fn handle_share(
         "password-auth" => handle_share_password_auth(state, args).await,
         "guest-auth" => handle_share_guest_auth(state, args).await,
         "available" => handle_share_available(state, args).await,
-        "check-name" => handle_share_check_name(state, args).await,
         _ => Ok(error_text(&format!("Unknown share action: {action}"))),
     }
 }
@@ -8785,10 +8778,38 @@ async fn handle_share_list(
     }
 }
 
+/// Normalize a share slug the way the server does before comparing names:
+/// trim ONLY space, tab, newline, carriage return, NUL and vertical tab from
+/// both ends, then lowercase.
+///
+/// Deliberately not [`str::trim`], which also strips other Unicode whitespace
+/// (a non-breaking space, for one) that the server's normalization keeps.
+fn normalize_share_slug(raw: &str) -> String {
+    raw.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0B'))
+        .to_lowercase()
+}
+
+/// The stored `custom_name` from a share-details response, if any.
+///
+/// The details payload nests the share under `share`; a bare share object is
+/// accepted too so the read does not depend on which envelope shape arrived.
+fn stored_share_custom_name(details: &Value) -> Option<&str> {
+    details
+        .get("share")
+        .and_then(|s| s.get("custom_name"))
+        .or_else(|| details.get("custom_name"))
+        .and_then(Value::as_str)
+}
+
 async fn handle_share_create(
     state: &McpState,
     args: &Map<String, Value>,
 ) -> Result<CallToolResult, McpError> {
+    // Custom share names can no longer be set. Refuse the key whatever its
+    // value (JSON null included) so a create never silently drops it.
+    if args.contains_key("custom_name") {
+        return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG));
+    }
     // Deep Indexing is required server-side; default to false (off).
     // STRICT: a present non-bool must not be read as absent — see the
     // silent-default sweep note on `optional_str_strict`.
@@ -8826,7 +8847,6 @@ async fn handle_share_create(
             folder_node_id: optional_str(args, "folder_node_id"),
             create_folder: optional_bool(args, "create_folder"),
             folder_name: optional_str(args, "folder_name"),
-            custom_name: optional_str(args, "custom_name"),
             password: optional_str(args, "password"),
             expires: optional_str(args, "expires"),
             notify: optional_str(args, "notify"),
@@ -8886,13 +8906,39 @@ async fn handle_share_update(
             "Invalid download_security value: must be \"high\", \"medium\", or \"off\"",
         ));
     }
+    // Custom share names can no longer be set or cleared. The only tolerated
+    // `custom_name` is one that echoes the share's CURRENT name (as a client
+    // round-tripping a fetched share would send); it is then dropped from the
+    // request. Anything else refuses the WHOLE update, so a mixed update never
+    // applies its other fields while silently losing the name change.
+    let echoed_name = match args.get("custom_name") {
+        None => None,
+        Some(Value::String(raw)) => {
+            let normalized = normalize_share_slug(raw);
+            if normalized.is_empty() || normalized == "null" {
+                return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG));
+            }
+            Some(normalized)
+        }
+        Some(_) => return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG)),
+    };
+    if let Some(supplied) = echoed_name {
+        let details = match api::share::get_share_details(&client, share_id).await {
+            Ok(v) => v,
+            Err(e) => return Ok(cli_err_to_result(&e)),
+        };
+        let is_echo = stored_share_custom_name(&details)
+            .is_some_and(|stored| normalize_share_slug(stored) == supplied);
+        if !is_echo {
+            return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG));
+        }
+    }
     match api::share::update_share(
         &client,
         &api::share::UpdateShareParams {
             share_id,
             name: optional_str(args, "name"),
             title: optional_str(args, "title"),
-            custom_name: optional_str(args, "custom_name"),
             description: optional_str(args, "description"),
             share_type: optional_str(args, "share_type"),
             access_options: optional_str(args, "access_options"),
@@ -9117,21 +9163,6 @@ async fn handle_share_available(
 ) -> Result<CallToolResult, McpError> {
     let client = state.client().read().await;
     match api::share::available_shares(&client).await {
-        Ok(v) => Ok(success_json(&v)),
-        Err(e) => Ok(cli_err_to_result(&e)),
-    }
-}
-
-async fn handle_share_check_name(
-    state: &McpState,
-    args: &Map<String, Value>,
-) -> Result<CallToolResult, McpError> {
-    let client = state.client().read().await;
-    let name = match required_str(args, "name") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    match api::share::check_share_name(&client, name).await {
         Ok(v) => Ok(success_json(&v)),
         Err(e) => Ok(cli_err_to_result(&e)),
     }
@@ -10058,6 +10089,10 @@ fn json_value_id_to_string(v: &Value) -> Option<String> {
 
 /// The message every `sign` call returns: e-signatures are no longer available.
 const SIGN_DISABLED_MSG: &str = "E-signatures are no longer available.";
+
+/// The message a `share` create/update returns when it would set or clear a
+/// custom share name: custom share URLs can no longer be set.
+const CUSTOM_SHARE_NAME_RETIRED_MSG: &str = "Custom share URLs are no longer supported.";
 
 /// The message a disabled cloud-import surface returns.
 ///
@@ -15973,6 +16008,14 @@ mod ripley_tool_tests {
         "metadata-update",
     ];
 
+    /// Retired actions of the `share` tool. Same contract as
+    /// [`DEAD_METADATA_ACTIONS`].
+    const DEAD_SHARE_ACTIONS: &[&str] = &[
+        // `check-name` — removed 2026-11-17: custom share names can no longer
+        // be set, so there is nothing to check availability for.
+        "check-name",
+    ];
+
     /// Retired actions of the `ripley` tool. Same contract as
     /// [`DEAD_METADATA_ACTIONS`].
     const DEAD_RIPLEY_ACTIONS: &[&str] = &[
@@ -16451,6 +16494,15 @@ mod ripley_tool_tests {
             assert!(
                 text.contains("Unknown workspace action"),
                 "`{action}` was retired from the `workspace` tool but its handler \
+                 arm still dispatches — hidden but callable: {text}"
+            );
+        }
+
+        for action in DEAD_SHARE_ACTIONS.iter().copied() {
+            let text = dispatch_action(&router, "share", action).await;
+            assert!(
+                text.contains("Unknown share action"),
+                "`{action}` was retired from the `share` tool but its handler \
                  arm still dispatches — hidden but callable: {text}"
             );
         }
@@ -17228,6 +17280,33 @@ mod ripley_tool_tests {
                 "`{retired}` is retired but still advertised on the workspace tool"
             );
         }
+    }
+
+    #[test]
+    fn retired_share_name_surface_is_not_advertised() {
+        // `dead_actions_are_really_gone` proves the `check-name` arm is gone;
+        // this pins that the share SCHEMA stopped naming it and the retired
+        // `custom_name` param.
+        let def = super::TOOL_DEFS
+            .iter()
+            .find(|d| d.name == "share")
+            .expect("share tool present");
+        for retired in DEAD_SHARE_ACTIONS {
+            assert!(
+                !def.actions.contains(retired),
+                "`{retired}` is retired but still advertised on the share tool"
+            );
+        }
+        assert!(
+            def.params.iter().all(|(name, _, _)| *name != "custom_name"),
+            "`custom_name` is retired but still advertised on the share tool"
+        );
+        // The workspace tool's own `check-name` is unrelated and stays.
+        let ws = super::TOOL_DEFS
+            .iter()
+            .find(|d| d.name == "workspace")
+            .expect("workspace tool present");
+        assert!(ws.actions.contains(&"check-name"));
     }
 
     #[test]
@@ -23628,6 +23707,234 @@ mod ripley_tool_tests {
         )));
         state.set_token("test-token".to_owned()).await;
         (ToolRouter::new_for_tests(state), seen)
+    }
+
+    // ─── Share custom names ────────────────────────────────────────────────
+
+    const SHARE_ID: &str = "1234567890123456789";
+
+    /// Call `share` `action` with `pairs` on `router`; return (`is_error`, text).
+    async fn call_share(
+        router: &ToolRouter,
+        action: &str,
+        pairs: &[(&str, Value)],
+    ) -> (bool, String) {
+        let res = router
+            .call_tool("share", comment_args(action, pairs))
+            .await
+            .expect("call_tool ok");
+        (res.is_error == Some(true), result_to_string(&res))
+    }
+
+    fn seen_lines(seen: &Arc<std::sync::Mutex<Vec<(String, String)>>>) -> Vec<(String, String)> {
+        seen.lock().expect("capture lock").clone()
+    }
+
+    #[test]
+    fn share_slug_normalization_trims_only_the_server_set_and_lowercases() {
+        assert_eq!(
+            super::normalize_share_slug(" \t\n\r\0\x0BQ4-Reports \t\n\r\0\x0B"),
+            "q4-reports"
+        );
+        // A non-breaking space is NOT in the trimmed set (unlike `str::trim`).
+        assert_eq!(
+            super::normalize_share_slug("\u{a0}Q4\u{a0}"),
+            "\u{a0}q4\u{a0}"
+        );
+        // Interior whitespace is kept.
+        assert_eq!(super::normalize_share_slug(" A b "), "a b");
+        assert_eq!(super::normalize_share_slug(" NULL "), "null");
+    }
+
+    #[tokio::test]
+    async fn share_create_refuses_custom_name_whatever_its_value() {
+        for value in [json!("x"), json!(""), json!("null"), json!(5), Value::Null] {
+            let (router, seen) = capturing_router(json!({"result": true})).await;
+            let (is_err, text) = call_share(
+                &router,
+                "create",
+                &[
+                    ("workspace_id", json!(SHARE_ID)),
+                    ("name", json!("Quarterly")),
+                    ("custom_name", value.clone()),
+                ],
+            )
+            .await;
+            assert!(is_err, "custom_name = {value} must be refused: {text}");
+            assert!(
+                text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+                "custom_name = {value}: got {text}"
+            );
+            assert!(
+                seen_lines(&seen).is_empty(),
+                "custom_name = {value}: a refused create must send nothing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn share_create_without_custom_name_still_reaches_the_server() {
+        // Positive control for the refusal above.
+        let (router, seen) = capturing_router(json!({"result": true})).await;
+        let (is_err, text) = call_share(
+            &router,
+            "create",
+            &[
+                ("workspace_id", json!(SHARE_ID)),
+                ("name", json!("Quarterly")),
+            ],
+        )
+        .await;
+        assert!(!is_err, "create without custom_name must succeed: {text}");
+        let lines = seen_lines(&seen);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].0.starts_with("POST "), "{lines:?}");
+        assert!(!lines[0].1.contains("custom_name"), "{lines:?}");
+    }
+
+    fn stored_share_reply() -> Value {
+        json!({"result": true, "share": {"id": SHARE_ID, "custom_name": "q4-reports"}})
+    }
+
+    #[tokio::test]
+    async fn share_update_refuses_a_name_change_after_one_read() {
+        // A different name, alone or mixed with another field: the whole
+        // update is refused after the single details read, and nothing is
+        // POSTed (so `title` is not applied either).
+        for pairs in [
+            vec![("custom_name", json!("other"))],
+            vec![("title", json!("T")), ("custom_name", json!("other"))],
+        ] {
+            let (router, seen) = capturing_router(stored_share_reply()).await;
+            let mut args = vec![("share_id", json!(SHARE_ID))];
+            args.extend(pairs.iter().cloned());
+            let (is_err, text) = call_share(&router, "update", &args).await;
+            assert!(is_err, "{pairs:?} must be refused: {text}");
+            assert!(
+                text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+                "{pairs:?}: {text}"
+            );
+            let lines = seen_lines(&seen);
+            assert_eq!(lines.len(), 1, "{pairs:?}: only the read: {lines:?}");
+            assert!(
+                lines[0].0.starts_with("GET ")
+                    && lines[0].0.contains(&format!("/share/{SHARE_ID}/details/")),
+                "{pairs:?}: {lines:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn share_update_drops_an_echo_of_the_stored_name() {
+        for (pairs, title) in [
+            // Case and server-trimmed padding still match.
+            (vec![("custom_name", json!("  Q4-Reports\n"))], false),
+            (
+                vec![("title", json!("T")), ("custom_name", json!("q4-reports"))],
+                true,
+            ),
+        ] {
+            let (router, seen) = capturing_router(stored_share_reply()).await;
+            let mut args = vec![("share_id", json!(SHARE_ID))];
+            args.extend(pairs.iter().cloned());
+            let (is_err, text) = call_share(&router, "update", &args).await;
+            assert!(!is_err, "{pairs:?}: an echo must not be refused: {text}");
+            let lines = seen_lines(&seen);
+            assert_eq!(lines.len(), 2, "{pairs:?}: read then update: {lines:?}");
+            assert!(
+                lines[0].0.starts_with("GET ") && lines[0].0.contains("/details/"),
+                "{pairs:?}: {lines:?}"
+            );
+            assert!(
+                lines[1].0.starts_with("POST ")
+                    && lines[1].0.contains(&format!("/share/{SHARE_ID}/update/")),
+                "{pairs:?}: {lines:?}"
+            );
+            assert!(
+                !lines[1].1.contains("custom_name"),
+                "{pairs:?}: the echoed name must be dropped from the update: {lines:?}"
+            );
+            if title {
+                assert!(lines[1].1.contains("title=T"), "{pairs:?}: {lines:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn share_update_refuses_a_clear_or_non_string_name_without_a_request() {
+        for value in [
+            json!(""),
+            json!("null"),
+            json!(" NULL\t"),
+            json!(7),
+            Value::Null,
+        ] {
+            let (router, seen) = capturing_router(stored_share_reply()).await;
+            let (is_err, text) = call_share(
+                &router,
+                "update",
+                &[
+                    ("share_id", json!(SHARE_ID)),
+                    ("custom_name", value.clone()),
+                ],
+            )
+            .await;
+            assert!(is_err, "custom_name = {value} must be refused: {text}");
+            assert!(
+                text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+                "custom_name = {value}: {text}"
+            );
+            assert!(
+                seen_lines(&seen).is_empty(),
+                "custom_name = {value}: must be refused before any request"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn share_update_refuses_a_name_when_the_share_has_none() {
+        let (router, seen) =
+            capturing_router(json!({"result": true, "share": {"id": SHARE_ID}})).await;
+        let (is_err, text) = call_share(
+            &router,
+            "update",
+            &[("share_id", json!(SHARE_ID)), ("custom_name", json!("x"))],
+        )
+        .await;
+        assert!(is_err, "must be refused: {text}");
+        assert!(
+            text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+            "{text}"
+        );
+        let lines = seen_lines(&seen);
+        assert_eq!(lines.len(), 1, "only the read: {lines:?}");
+        assert!(lines[0].0.starts_with("GET "), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn share_update_surfaces_a_failed_read_and_sends_no_update() {
+        let (router, seen) = capturing_router_with_status(
+            404,
+            json!({"result": "no", "error": {"code": 1609, "text": "Share not found"}}),
+        )
+        .await;
+        let (is_err, text) = call_share(
+            &router,
+            "update",
+            &[("share_id", json!(SHARE_ID)), ("custom_name", json!("x"))],
+        )
+        .await;
+        assert!(is_err, "a failed read must be an error: {text}");
+        assert!(
+            !text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+            "the read failure, not the refusal, must surface: {text}"
+        );
+        assert!(
+            seen_lines(&seen)
+                .iter()
+                .all(|(line, _)| !line.starts_with("POST ")),
+            "no update may be sent after a failed read"
+        );
     }
 
     fn comment_args(action: &str, pairs: &[(&str, Value)]) -> Map<String, Value> {

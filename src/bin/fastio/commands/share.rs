@@ -32,8 +32,6 @@ pub struct ShareCreateArgs {
     pub create_folder: Option<bool>,
     /// Name for the new backing folder.
     pub folder_name: Option<String>,
-    /// URL-friendly custom name.
-    pub custom_name: Option<String>,
     /// Password for share access.
     pub password: Option<String>,
     /// Expiration datetime.
@@ -82,8 +80,6 @@ pub struct ShareUpdateArgs {
     pub name: Option<String>,
     /// New display title.
     pub title: Option<String>,
-    /// New URL-friendly custom name.
-    pub custom_name: Option<String>,
     /// New description.
     pub description: Option<String>,
     /// Share direction type.
@@ -191,11 +187,6 @@ pub enum ShareCommand {
     },
     /// List available shares for the current user.
     Available,
-    /// Check if a share name is available.
-    CheckName {
-        /// Share name to check.
-        name: String,
-    },
     /// Share file operations.
     Files(ShareFilesCommand),
     /// Share member operations.
@@ -431,7 +422,6 @@ pub async fn execute(command: &ShareCommand, ctx: &CommandContext<'_>) -> Result
             public_info(ctx, share_id).await
         }
         ShareCommand::Available => available(ctx).await,
-        ShareCommand::CheckName { name } => check_name(ctx, name).await,
         ShareCommand::Files(cmd) => files(cmd, ctx).await,
         ShareCommand::Members(cmd) => members(cmd, ctx).await,
         ShareCommand::Invitation(cmd) => invitations(cmd, ctx).await,
@@ -464,7 +454,6 @@ async fn create(ctx: &CommandContext<'_>, args: &ShareCreateArgs) -> Result<()> 
             folder_node_id: args.folder_node_id.as_deref(),
             create_folder: args.create_folder,
             folder_name: args.folder_name.as_deref(),
-            custom_name: args.custom_name.as_deref(),
             password: args.password.as_deref(),
             expires: args.expires.as_deref(),
             notify: args.notify.as_deref(),
@@ -506,7 +495,6 @@ async fn info(ctx: &CommandContext<'_>, share_id: &str) -> Result<()> {
 fn update_has_any_field(a: &ShareUpdateArgs) -> bool {
     a.name.is_some()
         || a.title.is_some()
-        || a.custom_name.is_some()
         || a.description.is_some()
         || a.share_type.is_some()
         || a.access_options.is_some()
@@ -547,7 +535,6 @@ async fn update(ctx: &CommandContext<'_>, args: &ShareUpdateArgs) -> Result<()> 
             share_id: &args.share_id,
             name: args.name.as_deref(),
             title: args.title.as_deref(),
-            custom_name: args.custom_name.as_deref(),
             description: args.description.as_deref(),
             share_type: args.share_type.as_deref(),
             access_options: args.access_options.as_deref(),
@@ -880,16 +867,6 @@ async fn available(ctx: &CommandContext<'_>) -> Result<()> {
     let value = api::share::available_shares(&client)
         .await
         .context("failed to list available shares")?;
-    ctx.output.render(&value)?;
-    Ok(())
-}
-
-/// Check if a share name is available.
-async fn check_name(ctx: &CommandContext<'_>, name: &str) -> Result<()> {
-    let client = ctx.build_client()?;
-    let value = api::share::check_share_name(&client, name)
-        .await
-        .context("failed to check share name")?;
     ctx.output.render(&value)?;
     Ok(())
 }
