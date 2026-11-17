@@ -135,7 +135,7 @@ A service account key is limited to its one workspace.
 
 Roles: `viewer` (read, download, search, AI chat) or `editor` (viewer plus upload, edit, move, rename, trash, metadata, comments).
 
-Management and sharing operations (members, invitations, creating shares, File Shares, sign, imports, org changes, permanently purging files or emptying the trash, key/account management) return HTTP `403` with reason `service_account_not_permitted`. Identity reads (`auth status`, `auth check`, `workspace list`) work, and public share links behave as if the request were anonymous.
+Management and sharing operations (members, invitations, creating shares, File Shares, imports, org changes, permanently purging files or emptying the trash, key/account management) return HTTP `403` with reason `service_account_not_permitted`. Identity reads (`auth status`, `auth check`, `workspace list`) work, and public share links behave as if the request were anonymous.
 
 The secret cannot be retrieved again; if it is lost, `fastio sa key create` a new one and `fastio sa key revoke` the old one.
 
@@ -279,7 +279,7 @@ The CLI includes a built-in [Model Context Protocol](https://modelcontextprotoco
 fastio mcp
 ```
 
-This exposes the CLI's action-routed tool surface as MCP tools over stdio, compatible with Claude Desktop, VS Code, and other MCP-compatible clients. A few high-risk or local-byte operations (sign send/void, fileshare upload write-back and ws-token, and service account management, which mints secrets) remain CLI-only.
+This exposes the CLI's action-routed tool surface as MCP tools over stdio, compatible with Claude Desktop, VS Code, and other MCP-compatible clients. A few high-risk or local-byte operations (fileshare upload write-back and ws-token, and service account management, which mints secrets) remain CLI-only.
 
 Tool responses are rendered as GitHub-flavored Markdown by default,
 byte-equivalent to the Fastio API's `?output=markdown` output.

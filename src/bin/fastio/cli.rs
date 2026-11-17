@@ -181,10 +181,10 @@ pub enum Commands {
     #[command(subcommand)]
     Event(EventCommands),
     /// Per-workspace dashboard: the calling member's ranked, actionable card
-    /// feed (@mentions, file activity, file versions, synthesis, and signature
-    /// cards). Dismiss / snooze / undismiss
-    /// are per-member and out-of-band — they only hide a card from your own feed,
-    /// never resolving the underlying card subject.
+    /// feed (@mentions, file activity, file versions, and synthesis cards).
+    /// Dismiss / snooze / undismiss are per-member and out-of-band — they only
+    /// hide a card from your own feed, never resolving the underlying card
+    /// subject.
     #[command(subcommand)]
     Dashboard(DashboardCommands),
     /// File previews.
@@ -275,13 +275,8 @@ pub enum Commands {
     #[command(subcommand)]
     Metadata(MetadataCommands),
 
-    /// E-signature: draft, send, void, and download `SignEnvelopes` (PDFs sent
-    /// to recipients for electronic signature). Every envelope is parented to a
-    /// workspace (each subcommand takes a required `--workspace <id>`). Signing
-    /// is available on every plan; the org resource's `capabilities.signing`
-    /// confirms availability, and the server rejects calls with a
-    /// feature-disabled error if an org's plan does not grant it.
-    #[command(subcommand)]
+    /// E-signatures (no longer available; every subcommand is refused).
+    #[command(subcommand, hide = true)]
     Sign(SignCommands),
 
     /// File Shares: durable, link-shareable views of a single workspace file
@@ -508,10 +503,9 @@ pub enum SearchCommands {
 ///
 /// `SignEnvelopes` are parented to a Workspace; every subcommand takes a
 /// required `--workspace <id>` flag. Drafts are created and edited via these
-/// commands, then `send` emails real recipients. Signing is available on every
-/// plan; the org resource's `capabilities.signing` confirms availability, and
-/// the server rejects calls with a feature-disabled error (`1670`) if an org's
-/// plan does not grant it. Access also requires workspace membership.
+/// commands, then `send` emails real recipients. E-signatures are no longer
+/// available: every `fastio sign` command is refused before any config load
+/// or network call.
 // Justification: the envelope-lifecycle variant carries the create/update
 // flag set and is larger than the download variants. This is a clap subcommand
 // enum constructed once at parse time and immediately dispatched (never stored

@@ -151,7 +151,7 @@ Each module contains typed functions mapping to Fast.io REST endpoints:
 | `apps.rs` | 4 functions | List, details, launch, tool-apps |
 | `import.rs` | 22 functions | Providers, identities, sources, jobs, writebacks |
 | `locking.rs` | 3 functions | Acquire, status, release |
-| `signing.rs` | 14 functions | E-signature (SignEnvelope) — workspace-only CRUD/lifecycle, document/preview/signed/audit download paths |
+| `signing.rs` | 14 functions | E-signature (SignEnvelope) — workspace-only CRUD/lifecycle, document/preview/signed/audit download paths. Disabled — no command reaches these. |
 | `fileshare.rs` | 10 functions | File Shares — durable single-file link shares (replacing the retired QuickShare): management create/list/update/delete + grants, password-capable anonymous consumption (details/versions), write-back path builders, websocket-auth token, named-key extractors |
 | `types.rs` | — | Shared response structs |
 
@@ -182,7 +182,7 @@ Each module handles one command group, orchestrating API calls and output render
 | `apps.rs` | 4 | App integration |
 | `import.rs` | 22 | Cloud import/sync |
 | `lock.rs` | 3 | File locking |
-| `sign.rs` | 10 | E-signature (workspace-only): envelope create/list/get/update/send/void, document download/preview/signed, audit download |
+| `sign.rs` | 10 | E-signature — disabled: every command is refused (envelope create/list/get/update/send/void, document download/preview/signed, audit download) |
 | `fileshare.rs` | 12 | File Shares: create/list/info/update/delete, grants list/add/remove, download/versions/preview, upload (write-back, CAS), activity, ws-token. `map_fileshare_error` + anonymous-capable consumption client |
 | `secret_output.rs` | — | Shared helper (not a command group): `extract_secret` / `write_secret_file` (0600) / `redact_secret_field` for realtime / ws tokens (used by `fileshare`) |
 | `configure.rs` | 4 | CLI configuration |

@@ -2319,7 +2319,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "dashboard",
-        description: "Per-workspace dashboard: the calling member's ranked, paginated feed of ACTIONABLE cards (@mentions, file activity, file versions, synthesis, and pending signatures). Actions: get (read the feed; paginate with limit 1-200 / offset), dismiss (hide a card from YOUR feed — permanently, or snooze it until a future time via snooze_until 'YYYY-MM-DD HH:MM:SS UTC'), undismiss (restore a card; idempotent). Dismiss / snooze / undismiss are PER-MEMBER and OUT-OF-BAND — they change only YOUR view and never advance, resolve, or modify the underlying card subject. card_key comes from a card's card_key field (URL-encoding is handled for you). Signature cards carry a sign-ceremony link for their primary action.",
+        description: "Per-workspace dashboard: the calling member's ranked, paginated feed of ACTIONABLE cards (@mentions, file activity, file versions, and synthesis). Actions: get (read the feed; paginate with limit 1-200 / offset), dismiss (hide a card from YOUR feed — permanently, or snooze it until a future time via snooze_until 'YYYY-MM-DD HH:MM:SS UTC'), undismiss (restore a card; idempotent). Dismiss / snooze / undismiss are PER-MEMBER and OUT-OF-BAND — they change only YOUR view and never advance, resolve, or modify the underlying card subject. card_key comes from a card's card_key field (URL-encoding is handled for you).",
         actions: &[
             "get",
             "dismiss",
@@ -2827,7 +2827,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "sign",
-        description: "E-signature (SignEnvelope): draft and drive electronic-signature envelopes (PDFs sent to recipients). Every envelope is parented to a workspace (workspace_id; the former org surface was removed). This tool exposes READ, reversible-DRAFT-drive, and idempotent-RECOVERY actions: envelope-create (creates a DRAFT — reversible), envelope-update (draft-only; recipients are a full replacement; expires_at/policy_json are DECLARATIVE — omitting them CLEARS those fields, re-send to retain), envelope-list (filter via envelope_status / created_after / created_before), envelope-get, envelope-retry (re-drives a STUCK envelope through self-healing recovery — admin; idempotent + no-op-success; notifies no one; a permanent failure cascades to Failed), envelope-my-sign-link (mints YOUR OWN signing link for an envelope — the dashboard signature-card primary action; reversible/idempotent and notifies no one; requires a WRITE-scope token, so a read-only token is rejected with 10754; the structured result tells you the state — sign_url non-null = sign now, is_terminal = completed/void/declined, reauth_required = re-authenticate first, else you are blocked by routing order per blocked_signers), document-download (covers preview needs — the download bytes ARE the source/preview PDF, so there is no separate MCP preview action), signed-download, audit-download, describe. SIGN TEMPLATES (reusable envelope blueprints, template id sa…): template-list, template-details, and template-instantiate (resolves recipient_bindings/documents against the blueprint and creates a reversible DRAFT envelope) are exposed over MCP (reads + reversible draft creation); template-create, template-update, and template-delete are intentionally CLI-binary-only (`fastio sign template create|update|delete …`) and are NOT routable over MCP (mirrors the send/void boundary). The OUTWARD-FACING / TERMINAL actions — send (EMAILS REAL RECIPIENTS) and void (terminal) — are intentionally CLI-binary-only (`fastio sign envelope send|void …`) and are NOT routable over MCP. Envelopes are voided, not deleted — there is no delete action. Binary downloads write to the agent's local filesystem and return a path + byte count (NOT base64). Signing is available on every plan; the org resource's capabilities.signing confirms availability, and the server rejects calls with a feature-disabled error (1670) if an org's plan does not grant it. Access also requires workspace membership. Call action='describe' for the authoritative per-action reference.",
+        description: "E-signature (SignEnvelope): draft and drive electronic-signature envelopes (PDFs sent to recipients). Every envelope is parented to a workspace (workspace_id; the former org surface was removed). This tool exposes READ, reversible-DRAFT-drive, and idempotent-RECOVERY actions: envelope-create (creates a DRAFT — reversible), envelope-update (draft-only; recipients are a full replacement; expires_at/policy_json are DECLARATIVE — omitting them CLEARS those fields, re-send to retain), envelope-list (filter via envelope_status / created_after / created_before), envelope-get, envelope-retry (re-drives a STUCK envelope through self-healing recovery — admin; idempotent + no-op-success; notifies no one; a permanent failure cascades to Failed), envelope-my-sign-link (mints YOUR OWN signing link for an envelope — the dashboard signature-card primary action; reversible/idempotent and notifies no one; requires a WRITE-scope token, so a read-only token is rejected with 10754; the structured result tells you the state — sign_url non-null = sign now, is_terminal = completed/void/declined, reauth_required = re-authenticate first, else you are blocked by routing order per blocked_signers), document-download (covers preview needs — the download bytes ARE the source/preview PDF, so there is no separate MCP preview action), signed-download, audit-download, describe. SIGN TEMPLATES (reusable envelope blueprints, template id sa…): template-list, template-details, and template-instantiate (resolves recipient_bindings/documents against the blueprint and creates a reversible DRAFT envelope) are exposed over MCP (reads + reversible draft creation); template-create, template-update, and template-delete are intentionally CLI-binary-only (`fastio sign template create|update|delete …`) and are NOT routable over MCP (mirrors the send/void boundary). The OUTWARD-FACING / TERMINAL actions — send (EMAILS REAL RECIPIENTS) and void (terminal) — are intentionally CLI-binary-only (`fastio sign envelope send|void …`) and are NOT routable over MCP. Envelopes are voided, not deleted — there is no delete action. Binary downloads write to the agent's local filesystem and return a path + byte count (NOT base64). E-signatures are no longer available: this tool is not advertised and every call, describe included, is refused.",
         actions: &[
             "describe",
             "envelope-create",
@@ -3158,6 +3158,24 @@ const TOOL_DEFS: &[ToolDef] = &[
 
 // ─── Tool Router ────────────────────────────────────────────────────────────
 
+/// Production e-signature gate. E-signatures are no longer available, so this
+/// is always false; [`ToolRouter::new`] and the `serve` startup check both read
+/// it, so there is exactly one switch.
+pub const SIGN_ENABLED: bool = false;
+
+/// Whether the per-tool kill-switches allow `name` (a CANONICAL tool name) to
+/// be exposed: `import` requires `cloud_import_enabled`, `sign` requires
+/// `sign_enabled`; every other tool passes. The single definition of the gate
+/// half of visibility, shared by [`ToolRouter`]'s listing gate and the `serve`
+/// startup check that rejects a `--tools` filter whose every tool is gated off.
+pub fn tool_gates_allow(name: &str, cloud_import_enabled: bool, sign_enabled: bool) -> bool {
+    match name {
+        "import" => cloud_import_enabled,
+        "sign" => sign_enabled,
+        _ => true,
+    }
+}
+
 /// Routes MCP tool calls to the appropriate handler function.
 #[derive(Clone)]
 pub struct ToolRouter {
@@ -3167,6 +3185,10 @@ pub struct ToolRouter {
     /// `import` tool is filtered out of `list_tools` and its `call_tool` arm
     /// returns the disabled error before any auth/client/arg work.
     cloud_import_enabled: bool,
+    /// E-signature gate. Always false in production ([`Self::new`]): the `sign`
+    /// tool is hidden from `list_tools` and every call, describe included, is
+    /// refused. Only test constructors set it true.
+    sign_enabled: bool,
     /// Optional `--tools` allow-list captured at server startup. `None` means
     /// "all tools" (the default). When `Some`, a tool is advertised in
     /// `list_tools` and callable in `call_tool` ONLY if its name is in the set;
@@ -3192,6 +3214,7 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled: crate::commands::import::cloud_import_enabled(),
+            sign_enabled: SIGN_ENABLED,
             tools_filter,
         }
     }
@@ -3204,6 +3227,7 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled: true,
+            sign_enabled: true,
             tools_filter: None,
         }
     }
@@ -3216,12 +3240,14 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled,
+            sign_enabled: true,
             tools_filter: None,
         }
     }
 
     /// Construct a router with an explicit cloud-import flag AND a `--tools`
-    /// allow-list, for the filter unit tests.
+    /// allow-list, for the filter unit tests. The e-signature gate matches
+    /// production ([`SIGN_ENABLED`]); use [`Self::with_sign_enabled`] to open it.
     #[cfg(test)]
     pub fn new_with_filter(
         state: Arc<McpState>,
@@ -3231,16 +3257,27 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled,
+            sign_enabled: SIGN_ENABLED,
             tools_filter,
         }
     }
 
+    /// Override the e-signature gate on a test router (the test constructors
+    /// leave it open so the `sign` handler stays testable).
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_sign_enabled(mut self, sign_enabled: bool) -> Self {
+        self.sign_enabled = sign_enabled;
+        self
+    }
+
     /// List all registered tools as MCP `Tool` descriptors, honoring the
-    /// cloud-import kill-switch AND the `--tools` allow-list captured at router
-    /// construction. This instance method is the sole production listing path:
-    /// it reads `self.cloud_import_enabled` and `self.tools_filter` (both fixed
-    /// at construction), so the advertised tool surface can never diverge from
-    /// the callable surface `call_tool` gates on the same fields.
+    /// cloud-import kill-switch, the e-signature gate AND the `--tools`
+    /// allow-list captured at router construction. This instance method is the
+    /// sole production listing path: it reads `self.cloud_import_enabled`,
+    /// `self.sign_enabled` and `self.tools_filter` (all fixed at construction),
+    /// so the advertised tool surface can never diverge from the callable
+    /// surface `call_tool` gates on the same fields.
     pub fn list_tools(&self) -> ListToolsResult {
         let tools = TOOL_DEFS
             .iter()
@@ -3276,16 +3313,16 @@ impl ToolRouter {
     }
 
     /// Whether a tool `name` is exposed in `list_tools` (the advertised set). A
-    /// tool is visible iff the cloud-import rule allows it (`import` requires
-    /// `cloud_import_enabled`) AND the `--tools` allow-list admits it
-    /// ([`Self::filter_admits`]). `call_tool` applies the SAME two rules at
-    /// dispatch time (allow-list via `filter_admits`, cloud import via its
-    /// `import` match arm), so advertised and callable stay in lockstep.
+    /// tool is visible iff the kill-switches allow it ([`tool_gates_allow`]:
+    /// `import` requires `cloud_import_enabled`, `sign` requires
+    /// `sign_enabled`) AND the `--tools` allow-list admits it
+    /// ([`Self::filter_admits`]). `call_tool` applies the SAME rules at
+    /// dispatch time (allow-list via `filter_admits`, the sign gate up front,
+    /// cloud import via its `import` match arm), so advertised and callable
+    /// stay in lockstep.
     fn tool_visible(&self, name: &str) -> bool {
-        if name == "import" && !self.cloud_import_enabled {
-            return false;
-        }
-        self.filter_admits(name)
+        tool_gates_allow(name, self.cloud_import_enabled, self.sign_enabled)
+            && self.filter_admits(name)
     }
 
     /// Whether, after applying BOTH the cloud-import rule and the `--tools`
@@ -3370,6 +3407,9 @@ impl ToolRouter {
         // the dispatch arm returns.
         if !self.cloud_import_enabled && canonical == "import" {
             return Ok(error_text(CLOUD_IMPORT_DISABLED_MSG));
+        }
+        if !self.sign_enabled && canonical == "sign" {
+            return Ok(error_text(SIGN_DISABLED_MSG));
         }
 
         // Universal describe (cloud-convention parity): EVERY tool
@@ -10090,6 +10130,9 @@ fn json_value_id_to_string(v: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+/// The message every `sign` call returns: e-signatures are no longer available.
+const SIGN_DISABLED_MSG: &str = "E-signatures are no longer available.";
 
 /// The message a disabled cloud-import surface returns.
 ///
@@ -18419,6 +18462,86 @@ mod ripley_tool_tests {
         );
     }
 
+    /// The production router hides `sign` from the advertised surface.
+    #[test]
+    fn production_router_hides_sign() {
+        let router = ToolRouter::new(
+            Arc::new(McpState::new_unauthenticated_for_test(
+                "https://api.fast.io/current",
+            )),
+            None,
+        );
+        assert!(
+            !router.visible_tool_names().contains(&"sign"),
+            "sign must not be visible on the production router"
+        );
+        assert!(
+            !router
+                .list_tools()
+                .tools
+                .iter()
+                .any(|t| t.name.as_ref() == "sign"),
+            "sign must not be listed on the production router"
+        );
+    }
+
+    /// With e-signatures disabled, `sign` is absent from `list_tools`, and
+    /// `--tools sign` alone leaves nothing visible.
+    #[test]
+    fn sign_hidden_when_disabled() {
+        let router = filtered_router(true, None).with_sign_enabled(false);
+        assert!(
+            !router
+                .list_tools()
+                .tools
+                .iter()
+                .any(|t| t.name.as_ref() == "sign"),
+            "sign must not be advertised when disabled"
+        );
+        assert!(!router.visible_tool_names().contains(&"sign"));
+        assert!(
+            !filtered_router(true, filter_of(&["sign"]))
+                .with_sign_enabled(false)
+                .has_visible_tools(),
+            "`--tools sign` with sign disabled has no visible tools"
+        );
+        assert!(
+            filtered_router(true, filter_of(&["sign"]))
+                .with_sign_enabled(true)
+                .has_visible_tools(),
+            "control: `--tools sign` with sign enabled is visible"
+        );
+    }
+
+    /// Every `sign` action — describe included — is refused before auth when
+    /// e-signatures are disabled, on both unauthenticated and authenticated
+    /// routers.
+    #[tokio::test]
+    async fn sign_calls_refused_when_disabled() {
+        let routers = [
+            unauthed_router().with_sign_enabled(false),
+            authed_router().await.with_sign_enabled(false),
+        ];
+        for router in &routers {
+            for action in ["describe", "envelope-list", "envelope-create"] {
+                let mut args = Map::new();
+                args.insert("action".to_owned(), Value::String(action.to_owned()));
+                args.insert("workspace_id".to_owned(), Value::String("ws1".to_owned()));
+                let res = router.call_tool("sign", args).await.expect("call_tool ok");
+                assert_eq!(res.is_error, Some(true), "{action} must be an error");
+                let text = result_to_string(&res);
+                assert!(
+                    text.contains(super::SIGN_DISABLED_MSG),
+                    "{action} must return the disabled message, got: {text}"
+                );
+                assert!(
+                    !text.contains("Not authenticated"),
+                    "{action}: the gate must fire before auth, got: {text}"
+                );
+            }
+        }
+    }
+
     /// `visible_tool_names` returns exactly the advertised set (canonical names,
     /// `TOOL_DEFS` order), honoring both gates — the source the server intro uses
     /// to enumerate a filtered surface.
@@ -18446,9 +18569,9 @@ mod ripley_tool_tests {
         }
     }
 
-    /// A `None` filter (the default) leaves the full surface intact — every
-    /// registered tool is advertised, matching the un-filtered production
-    /// behavior.
+    /// A `None` filter (the default) leaves the full production surface intact
+    /// — every registered tool except the gated-off `sign` is advertised
+    /// (cloud import enabled here).
     #[test]
     fn filter_none_is_full_surface() {
         let router = filtered_router(true, None);
@@ -18458,17 +18581,18 @@ mod ripley_tool_tests {
             .iter()
             .map(|t| t.name.as_ref().to_owned())
             .collect();
-        for def in TOOL_DEFS {
+        for def in TOOL_DEFS.iter().filter(|d| d.name != "sign") {
             assert!(
                 names.contains(def.name),
-                "None filter must advertise every tool; missing '{}'",
+                "None filter must advertise every ungated tool; missing '{}'",
                 def.name
             );
         }
+        assert!(!names.contains("sign"), "sign is gated off in production");
         assert_eq!(
             names.len(),
-            TOOL_DEFS.len(),
-            "None filter advertises exactly the full TOOL_DEFS surface"
+            TOOL_DEFS.len() - 1,
+            "None filter advertises exactly TOOL_DEFS minus sign"
         );
     }
 
@@ -19912,7 +20036,9 @@ mod ripley_tool_tests {
     /// router, and none may return an error.
     #[tokio::test]
     async fn every_tool_describes_without_auth() {
-        let router = filtered_router(true, None);
+        // Sign gate opened so `sign`'s describe payload stays covered; the
+        // refusal with the gate closed is locked by `sign_calls_refused_when_disabled`.
+        let router = filtered_router(true, None).with_sign_enabled(true);
         for def in super::TOOL_DEFS {
             let mut args = Map::new();
             args.insert("action".to_owned(), Value::String("describe".to_owned()));
