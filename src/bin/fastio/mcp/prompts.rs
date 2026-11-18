@@ -85,12 +85,6 @@ Use the `workspace` tool with `action: \"list\"` and provide your org_id.
 Use the `files` tool with `action: \"list\"` and provide your workspace_id —
 or skip the manual browse and let `ripley` `ask` answer over the content.
 
-## E-signature
-The `sign` tool drives workspace-scoped e-signature envelopes (read +
-draft-drive only; `send`/`void` are CLI-binary-only — envelopes are voided, not
-deleted). Signing is available on every plan; the org resource's
-`capabilities.signing` confirms availability.
-
 ## Available Tool Domains
 This is the FULL default surface; the operator may restrict it by starting the
 server with `fastio mcp --tools <a,b,...>`, in which case `list_tools` (and the
@@ -101,8 +95,7 @@ for the authoritative live set.
 - ripley, member, comment, event, invitation, dashboard
 - preview, asset, apps, import, lock, metadata
 - system, id, howto
-- sign
 
 Each tool uses an `action` parameter to select the operation; the
-fileshare, id and sign tools support
+fileshare and id tools support
 `action: \"describe\"` for an authoritative per-action reference.";

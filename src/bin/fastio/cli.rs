@@ -156,9 +156,8 @@ pub enum Commands {
     #[command(subcommand)]
     Share(ShareCommands),
     /// Offload multi-step work to Ripley — Fast.io's AI agent. Ask questions
-    /// about your content and generate AI shares. To find things, use `fastio
-    /// search` instead. (The former `ai` group; `ai` still works as a hidden
-    /// alias.)
+    /// about your content. To find things, use `fastio search` instead. (The
+    /// former `ai` group; `ai` still works as a hidden alias.)
     #[command(subcommand, alias = "ai")]
     Ripley(RipleyCommands),
     /// File comments.
@@ -181,10 +180,10 @@ pub enum Commands {
     #[command(subcommand)]
     Event(EventCommands),
     /// Per-workspace dashboard: the calling member's ranked, actionable card
-    /// feed (@mentions, file activity, file versions, synthesis, and signature
-    /// cards). Dismiss / snooze / undismiss
-    /// are per-member and out-of-band — they only hide a card from your own feed,
-    /// never resolving the underlying card subject.
+    /// feed (@mentions, file activity, file versions, and synthesis cards).
+    /// Dismiss / snooze / undismiss are per-member and out-of-band — they only
+    /// hide a card from your own feed, never resolving the underlying card
+    /// subject.
     #[command(subcommand)]
     Dashboard(DashboardCommands),
     /// File previews.
@@ -275,13 +274,8 @@ pub enum Commands {
     #[command(subcommand)]
     Metadata(MetadataCommands),
 
-    /// E-signature: draft, send, void, and download `SignEnvelopes` (PDFs sent
-    /// to recipients for electronic signature). Every envelope is parented to a
-    /// workspace (each subcommand takes a required `--workspace <id>`). Signing
-    /// is available on every plan; the org resource's `capabilities.signing`
-    /// confirms availability, and the server rejects calls with a
-    /// feature-disabled error if an org's plan does not grant it.
-    #[command(subcommand)]
+    /// E-signatures (no longer available; every subcommand is refused).
+    #[command(subcommand, hide = true)]
     Sign(SignCommands),
 
     /// File Shares: durable, link-shareable views of a single workspace file
@@ -508,10 +502,9 @@ pub enum SearchCommands {
 ///
 /// `SignEnvelopes` are parented to a Workspace; every subcommand takes a
 /// required `--workspace <id>` flag. Drafts are created and edited via these
-/// commands, then `send` emails real recipients. Signing is available on every
-/// plan; the org resource's `capabilities.signing` confirms availability, and
-/// the server rejects calls with a feature-disabled error (`1670`) if an org's
-/// plan does not grant it. Access also requires workspace membership.
+/// commands, then `send` emails real recipients. E-signatures are no longer
+/// available: every `fastio sign` command is refused before any config load
+/// or network call.
 // Justification: the envelope-lifecycle variant carries the create/update
 // flag set and is larger than the download variants. This is a clap subcommand
 // enum constructed once at parse time and immediately dispatched (never stored
@@ -4100,9 +4093,6 @@ pub enum ShareCommands {
         /// Name for the new backing folder (with --create-folder).
         #[arg(long)]
         folder_name: Option<String>,
-        /// URL-friendly custom name (auto-generated when omitted).
-        #[arg(long)]
-        custom_name: Option<String>,
         /// Password for share access (Send + 'Anyone with the link' only).
         #[arg(long)]
         password: Option<String>,
@@ -4173,9 +4163,6 @@ pub enum ShareCommands {
         /// New display title (2-80 chars), or "null" to clear.
         #[arg(long)]
         title: Option<String>,
-        /// New URL-friendly custom name, or "null" to clear.
-        #[arg(long)]
-        custom_name: Option<String>,
         /// New description, or "null"/"" to clear.
         #[arg(long)]
         description: Option<String>,
@@ -4287,11 +4274,6 @@ pub enum ShareCommands {
     },
     /// List available shares for the current user.
     Available,
-    /// Check if a share name is available.
-    CheckName {
-        /// Share name to check.
-        name: String,
-    },
     /// Share file operations.
     #[command(subcommand)]
     Files(ShareFilesCommands),
@@ -4340,7 +4322,6 @@ impl fmt::Debug for ShareCommands {
                 folder_node_id,
                 create_folder,
                 folder_name,
-                custom_name,
                 password,
                 expires,
                 notify,
@@ -4371,7 +4352,6 @@ impl fmt::Debug for ShareCommands {
                 .field("folder_node_id", folder_node_id)
                 .field("create_folder", create_folder)
                 .field("folder_name", folder_name)
-                .field("custom_name", custom_name)
                 .field("password", &format_args!("{}", pw(password.as_ref())))
                 .field("expires", expires)
                 .field("notify", notify)
@@ -4396,7 +4376,6 @@ impl fmt::Debug for ShareCommands {
                 share_id,
                 name,
                 title,
-                custom_name,
                 description,
                 share_type,
                 access_options,
@@ -4426,7 +4405,6 @@ impl fmt::Debug for ShareCommands {
                 .field("share_id", share_id)
                 .field("name", name)
                 .field("title", title)
-                .field("custom_name", custom_name)
                 .field("description", description)
                 .field("share_type", share_type)
                 .field("access_options", access_options)
@@ -4479,7 +4457,6 @@ impl fmt::Debug for ShareCommands {
                 .field("share_id", share_id)
                 .finish(),
             Self::Available => write!(f, "Available"),
-            Self::CheckName { name } => f.debug_struct("CheckName").field("name", name).finish(),
             Self::Files(c) => f.debug_tuple("Files").field(c).finish(),
             Self::Members(c) => f.debug_tuple("Members").field(c).finish(),
             Self::Invitation(c) => f.debug_tuple("Invitation").field(c).finish(),
@@ -5964,14 +5941,6 @@ pub enum RipleyCommands {
         /// Offset for pagination.
         #[arg(long)]
         offset: Option<u32>,
-    },
-    /// Generate a shareable AI summary from specific workspace files.
-    Summary {
-        /// Workspace ID.
-        #[arg(long)]
-        workspace: String,
-        /// File node IDs to include in the summary (at least one required).
-        node_ids: Vec<String>,
     },
     /// Cancel an in-progress chat message (idempotent; safe when nothing is pending).
     Cancel {
@@ -8754,6 +8723,23 @@ mod ripley_alias_tests {
     }
 
     #[test]
+    fn retired_ripley_summary_is_rejected_under_both_spellings() {
+        // The AI Share link (`summary`) verb was removed with its endpoint.
+        // The `ai` group alias must not keep it reachable either.
+        for group in ["ripley", "ai"] {
+            let res = Cli::try_parse_from(["fastio", group, "summary", "--workspace", "1", "n1"]);
+            // Assert the KIND, so the test cannot pass for an unrelated
+            // reason (e.g. a renamed `--workspace` flag).
+            let kind = res.err().map(|e| e.kind());
+            assert_eq!(
+                kind,
+                Some(clap::error::ErrorKind::InvalidSubcommand),
+                "`{group} summary` was retired and must be an unknown subcommand"
+            );
+        }
+    }
+
+    #[test]
     fn delegated_job_verbs_are_not_listed_in_ripley_help() {
         // Render the `ripley` subcommand's help and confirm the hidden
         // delegated-job verbs do not appear as listed subcommands.
@@ -9534,6 +9520,61 @@ mod share_debug_tests {
         // A present-vs-absent distinction is still legible on the Options.
         let none = parse(&["fastio", "share", "update", "sh1", "--title", "New"]);
         assert!(format!("{none:?}").contains("None"));
+    }
+}
+
+#[cfg(test)]
+mod share_custom_name_tests {
+    use super::Cli;
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    /// The error KIND clap reports for `argv`, or `None` if it parsed.
+    fn parse_error_kind(argv: &[&str]) -> Option<ErrorKind> {
+        Cli::try_parse_from(argv).err().map(|e| e.kind())
+    }
+
+    #[test]
+    fn share_create_and_update_reject_custom_name() {
+        // Custom share names can no longer be set. Assert the KIND so the test
+        // cannot pass for an unrelated reason (e.g. a renamed `--workspace`).
+        assert_eq!(
+            parse_error_kind(&[
+                "fastio",
+                "share",
+                "create",
+                "n",
+                "--workspace",
+                "1",
+                "--custom-name",
+                "x",
+            ]),
+            Some(ErrorKind::UnknownArgument),
+            "`share create --custom-name` must be an unknown argument"
+        );
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "update", "sh1", "--custom-name", "x"]),
+            Some(ErrorKind::UnknownArgument),
+            "`share update --custom-name` must be an unknown argument"
+        );
+        // Positive controls: the same argv without the flag still parses.
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "create", "n", "--workspace", "1"]),
+            None
+        );
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "update", "sh1", "--title", "T"]),
+            None
+        );
+    }
+
+    #[test]
+    fn share_check_name_is_an_unknown_subcommand() {
+        assert_eq!(
+            parse_error_kind(&["fastio", "share", "check-name", "x"]),
+            Some(ErrorKind::InvalidSubcommand),
+            "`share check-name` was retired and must be an unknown subcommand"
+        );
     }
 }
 

@@ -437,6 +437,27 @@ fn normalize_tools_filter(raw: &[String]) -> NormalizedToolsFilter {
     NormalizedToolsFilter { known, unknown }
 }
 
+/// Startup refusal when `--tools` leaves no tool visible (every admitted tool
+/// is hidden by a kill-switch). Shared by both startup checks in `serve`.
+const NO_VISIBLE_TOOLS_MSG: &str = "--tools left no tools visible on this server. `sign` \
+     (e-signatures) is no longer available; `import` requires \
+     FASTIO_ENABLE_CLOUD_IMPORT=1. Include at least one other tool.";
+
+/// Whether any tool in a validated `--tools` allow-list (`known`, canonical
+/// names) survives the per-tool kill-switches ([`tools::tool_gates_allow`]).
+/// Pure and env-free so `serve` can reject an all-gated filter (e.g.
+/// `--tools sign`) before loading config, refreshing a token, or touching the
+/// network.
+fn filter_has_ungated_tool(
+    known: &std::collections::HashSet<String>,
+    cloud_import_enabled: bool,
+    sign_enabled: bool,
+) -> bool {
+    known
+        .iter()
+        .any(|name| tools::tool_gates_allow(name, cloud_import_enabled, sign_enabled))
+}
+
 /// Start the MCP server over stdio transport.
 ///
 /// This is the main entry point called from `main.rs` when `fastio mcp` runs.
@@ -470,6 +491,15 @@ pub async fn serve(
                     "--tools matched no known tools; known: {}",
                     known.join(", ")
                 );
+            }
+            // Every admitted tool hidden by a kill-switch (e.g. `--tools sign`):
+            // refuse here, before Config::load, token refresh, or any network.
+            if !filter_has_ungated_tool(
+                &normalized.known,
+                crate::commands::import::cloud_import_enabled(),
+                tools::SIGN_ENABLED,
+            ) {
+                anyhow::bail!(NO_VISIBLE_TOOLS_MSG);
             }
             Some(normalized.known)
         }
@@ -538,18 +568,11 @@ pub async fn serve(
         allow_list,
     )?;
 
-    // Refuse to start with an empty EFFECTIVE tool surface — BEFORE stdio. This
-    // catches the case name-validation alone cannot: `--tools import` with cloud
-    // import disabled passes the all-unknown check (`import` is a known name) yet
-    // the cloud-import rule hides it, leaving zero visible tools. Failing here
-    // (rather than starting a live server that advertises nothing) mirrors the
-    // all-unknown fail-fast and gives the operator an actionable hint.
+    // Backstop for the pre-config check above, against the router actually
+    // built: refuse to start with an empty EFFECTIVE tool surface — BEFORE
+    // stdio — rather than run a live server that advertises nothing.
     if tools_filter.is_some() && !server.has_visible_tools() {
-        anyhow::bail!(
-            "--tools left no tools visible on this server. If you requested only \
-             `import`, set FASTIO_ENABLE_CLOUD_IMPORT=1; otherwise include at least \
-             one enabled tool."
-        );
+        anyhow::bail!(NO_VISIBLE_TOOLS_MSG);
     }
 
     let service = server
@@ -662,6 +685,39 @@ mod tests {
         let out = super::normalize_tools_filter(&["sign".to_owned()]);
         assert!(out.known.contains("sign"), "sign is a registered tool name");
         assert!(out.unknown.is_empty(), "sign must not be flagged unknown");
+    }
+
+    /// The pre-config startup check rejects a `--tools` filter whose every tool
+    /// is gated off under the production sign gate — `sign` alone, and
+    /// `sign,import` with cloud import disabled — and admits a filter with any
+    /// ungated tool. Pure, so no config or network is involved.
+    #[test]
+    fn filter_has_ungated_tool_rejects_all_gated_filters() {
+        let set = |names: &[&str]| -> std::collections::HashSet<String> {
+            names.iter().map(|s| (*s).to_owned()).collect()
+        };
+        let sign = tools::SIGN_ENABLED;
+        assert!(!super::filter_has_ungated_tool(&set(&["sign"]), true, sign));
+        assert!(!super::filter_has_ungated_tool(
+            &set(&["sign"]),
+            false,
+            sign
+        ));
+        assert!(!super::filter_has_ungated_tool(
+            &set(&["sign", "import"]),
+            false,
+            sign
+        ));
+        assert!(super::filter_has_ungated_tool(
+            &set(&["sign", "import"]),
+            true,
+            sign
+        ));
+        assert!(super::filter_has_ungated_tool(
+            &set(&["sign", "org"]),
+            false,
+            sign
+        ));
     }
 
     /// Hidden aliases in the raw `--tools` list are canonicalized: `ai` →

@@ -12,7 +12,8 @@
 //!
 //! A signature card's primary action — minting the caller's own signing
 //! link — lives in [`crate::api::signing::my_sign_link`]
-//! (it is envelope-scoped) and is surfaced as `fastio sign envelope my-sign-link`.
+//! (it is envelope-scoped). E-signatures are no longer available, so the
+//! `fastio sign` commands that wrapped it are refused.
 
 use std::collections::HashMap;
 

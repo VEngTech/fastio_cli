@@ -1663,7 +1663,6 @@ const TOOL_DEFS: &[ToolDef] = &[
             "password-auth",
             "guest-auth",
             "available",
-            "check-name",
             // Universal: every tool self-describes. Declared so a STRICT
             // client will actually send it — the router has always accepted
             // it, but a schema that omits it makes the call look invalid.
@@ -1678,11 +1677,6 @@ const TOOL_DEFS: &[ToolDef] = &[
                 false,
             ),
             ("title", "Display title (update); \"null\" to clear", false),
-            (
-                "custom_name",
-                "URL-friendly custom name (create/update); \"null\" to clear",
-                false,
-            ),
             (
                 "share_type",
                 "Direction: send, receive, exchange (create default exchange)",
@@ -1837,7 +1831,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "ripley",
-        description: "Offload multi-step work to Ripley, Fast.io's AI agent: ask a question and get the answer (ask — creates a chat and waits), lower-level chat create/list/details/update/delete/publish/cancel, message send/list/details/read, generate AI shares (share-generate), transactions, and autotitle. Searching is NOT a Ripley action. (Formerly the `ai` tool; `ai` still works as a hidden alias.)",
+        description: "Offload multi-step work to Ripley, Fast.io's AI agent: ask a question and get the answer (ask — creates a chat and waits), lower-level chat create/list/details/update/delete/publish/cancel, message send/list/details/read, transactions, and autotitle. Searching is NOT a Ripley action. (Formerly the `ai` tool; `ai` still works as a hidden alias.)",
         actions: &[
             "ask",
             "chat-create",
@@ -1851,7 +1845,6 @@ const TOOL_DEFS: &[ToolDef] = &[
             "message-list",
             "message-details",
             "message-read",
-            "share-generate",
             "transactions",
             "autotitle",
             // Universal: every tool self-describes. Declared so a STRICT
@@ -1862,7 +1855,7 @@ const TOOL_DEFS: &[ToolDef] = &[
         params: &[
             (
                 "context_type",
-                "Context: workspace or share (chat/message/share/transactions/autotitle)",
+                "Context: workspace or share (chat/message/transactions/autotitle)",
                 false,
             ),
             ("context_id", "Workspace or share ID", false),
@@ -1931,16 +1924,6 @@ const TOOL_DEFS: &[ToolDef] = &[
                 "Comma-separated file nodeId[:versionId] pairs (chat-create, message-send, ask). \
                  Collapses to the same file items in the `references` array as files_scope; \
                  may be combined with files_scope/folders_scope.",
-                false,
-            ),
-            (
-                "node_ids",
-                "Comma-separated file IDs (share-generate; converted to a JSON `files` array)",
-                false,
-            ),
-            (
-                "files",
-                "Comma-separated file IDs (share-generate; converted to a JSON `files` array)",
                 false,
             ),
             (
@@ -2319,7 +2302,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "dashboard",
-        description: "Per-workspace dashboard: the calling member's ranked, paginated feed of ACTIONABLE cards (@mentions, file activity, file versions, synthesis, and pending signatures). Actions: get (read the feed; paginate with limit 1-200 / offset), dismiss (hide a card from YOUR feed — permanently, or snooze it until a future time via snooze_until 'YYYY-MM-DD HH:MM:SS UTC'), undismiss (restore a card; idempotent). Dismiss / snooze / undismiss are PER-MEMBER and OUT-OF-BAND — they change only YOUR view and never advance, resolve, or modify the underlying card subject. card_key comes from a card's card_key field (URL-encoding is handled for you). Signature cards carry a sign-ceremony link for their primary action.",
+        description: "Per-workspace dashboard: the calling member's ranked, paginated feed of ACTIONABLE cards (@mentions, file activity, file versions, and synthesis). Actions: get (read the feed; paginate with limit 1-200 / offset), dismiss (hide a card from YOUR feed — permanently, or snooze it until a future time via snooze_until 'YYYY-MM-DD HH:MM:SS UTC'), undismiss (restore a card; idempotent). Dismiss / snooze / undismiss are PER-MEMBER and OUT-OF-BAND — they change only YOUR view and never advance, resolve, or modify the underlying card subject. card_key comes from a card's card_key field (URL-encoding is handled for you).",
         actions: &[
             "get",
             "dismiss",
@@ -2827,7 +2810,7 @@ const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "sign",
-        description: "E-signature (SignEnvelope): draft and drive electronic-signature envelopes (PDFs sent to recipients). Every envelope is parented to a workspace (workspace_id; the former org surface was removed). This tool exposes READ, reversible-DRAFT-drive, and idempotent-RECOVERY actions: envelope-create (creates a DRAFT — reversible), envelope-update (draft-only; recipients are a full replacement; expires_at/policy_json are DECLARATIVE — omitting them CLEARS those fields, re-send to retain), envelope-list (filter via envelope_status / created_after / created_before), envelope-get, envelope-retry (re-drives a STUCK envelope through self-healing recovery — admin; idempotent + no-op-success; notifies no one; a permanent failure cascades to Failed), envelope-my-sign-link (mints YOUR OWN signing link for an envelope — the dashboard signature-card primary action; reversible/idempotent and notifies no one; requires a WRITE-scope token, so a read-only token is rejected with 10754; the structured result tells you the state — sign_url non-null = sign now, is_terminal = completed/void/declined, reauth_required = re-authenticate first, else you are blocked by routing order per blocked_signers), document-download (covers preview needs — the download bytes ARE the source/preview PDF, so there is no separate MCP preview action), signed-download, audit-download, describe. SIGN TEMPLATES (reusable envelope blueprints, template id sa…): template-list, template-details, and template-instantiate (resolves recipient_bindings/documents against the blueprint and creates a reversible DRAFT envelope) are exposed over MCP (reads + reversible draft creation); template-create, template-update, and template-delete are intentionally CLI-binary-only (`fastio sign template create|update|delete …`) and are NOT routable over MCP (mirrors the send/void boundary). The OUTWARD-FACING / TERMINAL actions — send (EMAILS REAL RECIPIENTS) and void (terminal) — are intentionally CLI-binary-only (`fastio sign envelope send|void …`) and are NOT routable over MCP. Envelopes are voided, not deleted — there is no delete action. Binary downloads write to the agent's local filesystem and return a path + byte count (NOT base64). Signing is available on every plan; the org resource's capabilities.signing confirms availability, and the server rejects calls with a feature-disabled error (1670) if an org's plan does not grant it. Access also requires workspace membership. Call action='describe' for the authoritative per-action reference.",
+        description: "E-signature (SignEnvelope): draft and drive electronic-signature envelopes (PDFs sent to recipients). Every envelope is parented to a workspace (workspace_id; the former org surface was removed). This tool exposes READ, reversible-DRAFT-drive, and idempotent-RECOVERY actions: envelope-create (creates a DRAFT — reversible), envelope-update (draft-only; recipients are a full replacement; expires_at/policy_json are DECLARATIVE — omitting them CLEARS those fields, re-send to retain), envelope-list (filter via envelope_status / created_after / created_before), envelope-get, envelope-retry (re-drives a STUCK envelope through self-healing recovery — admin; idempotent + no-op-success; notifies no one; a permanent failure cascades to Failed), envelope-my-sign-link (mints YOUR OWN signing link for an envelope — the dashboard signature-card primary action; reversible/idempotent and notifies no one; requires a WRITE-scope token, so a read-only token is rejected with 10754; the structured result tells you the state — sign_url non-null = sign now, is_terminal = completed/void/declined, reauth_required = re-authenticate first, else you are blocked by routing order per blocked_signers), document-download (covers preview needs — the download bytes ARE the source/preview PDF, so there is no separate MCP preview action), signed-download, audit-download, describe. SIGN TEMPLATES (reusable envelope blueprints, template id sa…): template-list, template-details, and template-instantiate (resolves recipient_bindings/documents against the blueprint and creates a reversible DRAFT envelope) are exposed over MCP (reads + reversible draft creation); template-create, template-update, and template-delete are intentionally CLI-binary-only (`fastio sign template create|update|delete …`) and are NOT routable over MCP (mirrors the send/void boundary). The OUTWARD-FACING / TERMINAL actions — send (EMAILS REAL RECIPIENTS) and void (terminal) — are intentionally CLI-binary-only (`fastio sign envelope send|void …`) and are NOT routable over MCP. Envelopes are voided, not deleted — there is no delete action. Binary downloads write to the agent's local filesystem and return a path + byte count (NOT base64). E-signatures are no longer available: this tool is not advertised and every call, describe included, is refused.",
         actions: &[
             "describe",
             "envelope-create",
@@ -3158,6 +3141,24 @@ const TOOL_DEFS: &[ToolDef] = &[
 
 // ─── Tool Router ────────────────────────────────────────────────────────────
 
+/// Production e-signature gate. E-signatures are no longer available, so this
+/// is always false; [`ToolRouter::new`] and the `serve` startup check both read
+/// it, so there is exactly one switch.
+pub const SIGN_ENABLED: bool = false;
+
+/// Whether the per-tool kill-switches allow `name` (a CANONICAL tool name) to
+/// be exposed: `import` requires `cloud_import_enabled`, `sign` requires
+/// `sign_enabled`; every other tool passes. The single definition of the gate
+/// half of visibility, shared by [`ToolRouter`]'s listing gate and the `serve`
+/// startup check that rejects a `--tools` filter whose every tool is gated off.
+pub fn tool_gates_allow(name: &str, cloud_import_enabled: bool, sign_enabled: bool) -> bool {
+    match name {
+        "import" => cloud_import_enabled,
+        "sign" => sign_enabled,
+        _ => true,
+    }
+}
+
 /// Routes MCP tool calls to the appropriate handler function.
 #[derive(Clone)]
 pub struct ToolRouter {
@@ -3167,6 +3168,10 @@ pub struct ToolRouter {
     /// `import` tool is filtered out of `list_tools` and its `call_tool` arm
     /// returns the disabled error before any auth/client/arg work.
     cloud_import_enabled: bool,
+    /// E-signature gate. Always false in production ([`Self::new`]): the `sign`
+    /// tool is hidden from `list_tools` and every call, describe included, is
+    /// refused. Only test constructors set it true.
+    sign_enabled: bool,
     /// Optional `--tools` allow-list captured at server startup. `None` means
     /// "all tools" (the default). When `Some`, a tool is advertised in
     /// `list_tools` and callable in `call_tool` ONLY if its name is in the set;
@@ -3192,6 +3197,7 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled: crate::commands::import::cloud_import_enabled(),
+            sign_enabled: SIGN_ENABLED,
             tools_filter,
         }
     }
@@ -3204,6 +3210,7 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled: true,
+            sign_enabled: true,
             tools_filter: None,
         }
     }
@@ -3216,12 +3223,14 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled,
+            sign_enabled: true,
             tools_filter: None,
         }
     }
 
     /// Construct a router with an explicit cloud-import flag AND a `--tools`
-    /// allow-list, for the filter unit tests.
+    /// allow-list, for the filter unit tests. The e-signature gate matches
+    /// production ([`SIGN_ENABLED`]); use [`Self::with_sign_enabled`] to open it.
     #[cfg(test)]
     pub fn new_with_filter(
         state: Arc<McpState>,
@@ -3231,16 +3240,27 @@ impl ToolRouter {
         Self {
             state,
             cloud_import_enabled,
+            sign_enabled: SIGN_ENABLED,
             tools_filter,
         }
     }
 
+    /// Override the e-signature gate on a test router (the test constructors
+    /// leave it open so the `sign` handler stays testable).
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_sign_enabled(mut self, sign_enabled: bool) -> Self {
+        self.sign_enabled = sign_enabled;
+        self
+    }
+
     /// List all registered tools as MCP `Tool` descriptors, honoring the
-    /// cloud-import kill-switch AND the `--tools` allow-list captured at router
-    /// construction. This instance method is the sole production listing path:
-    /// it reads `self.cloud_import_enabled` and `self.tools_filter` (both fixed
-    /// at construction), so the advertised tool surface can never diverge from
-    /// the callable surface `call_tool` gates on the same fields.
+    /// cloud-import kill-switch, the e-signature gate AND the `--tools`
+    /// allow-list captured at router construction. This instance method is the
+    /// sole production listing path: it reads `self.cloud_import_enabled`,
+    /// `self.sign_enabled` and `self.tools_filter` (all fixed at construction),
+    /// so the advertised tool surface can never diverge from the callable
+    /// surface `call_tool` gates on the same fields.
     pub fn list_tools(&self) -> ListToolsResult {
         let tools = TOOL_DEFS
             .iter()
@@ -3276,16 +3296,16 @@ impl ToolRouter {
     }
 
     /// Whether a tool `name` is exposed in `list_tools` (the advertised set). A
-    /// tool is visible iff the cloud-import rule allows it (`import` requires
-    /// `cloud_import_enabled`) AND the `--tools` allow-list admits it
-    /// ([`Self::filter_admits`]). `call_tool` applies the SAME two rules at
-    /// dispatch time (allow-list via `filter_admits`, cloud import via its
-    /// `import` match arm), so advertised and callable stay in lockstep.
+    /// tool is visible iff the kill-switches allow it ([`tool_gates_allow`]:
+    /// `import` requires `cloud_import_enabled`, `sign` requires
+    /// `sign_enabled`) AND the `--tools` allow-list admits it
+    /// ([`Self::filter_admits`]). `call_tool` applies the SAME rules at
+    /// dispatch time (allow-list via `filter_admits`, the sign gate up front,
+    /// cloud import via its `import` match arm), so advertised and callable
+    /// stay in lockstep.
     fn tool_visible(&self, name: &str) -> bool {
-        if name == "import" && !self.cloud_import_enabled {
-            return false;
-        }
-        self.filter_admits(name)
+        tool_gates_allow(name, self.cloud_import_enabled, self.sign_enabled)
+            && self.filter_admits(name)
     }
 
     /// Whether, after applying BOTH the cloud-import rule and the `--tools`
@@ -3370,6 +3390,9 @@ impl ToolRouter {
         // the dispatch arm returns.
         if !self.cloud_import_enabled && canonical == "import" {
             return Ok(error_text(CLOUD_IMPORT_DISABLED_MSG));
+        }
+        if !self.sign_enabled && canonical == "sign" {
+            return Ok(error_text(SIGN_DISABLED_MSG));
         }
 
         // Universal describe (cloud-convention parity): EVERY tool
@@ -8734,7 +8757,6 @@ async fn handle_share(
         "password-auth" => handle_share_password_auth(state, args).await,
         "guest-auth" => handle_share_guest_auth(state, args).await,
         "available" => handle_share_available(state, args).await,
-        "check-name" => handle_share_check_name(state, args).await,
         _ => Ok(error_text(&format!("Unknown share action: {action}"))),
     }
 }
@@ -8756,10 +8778,38 @@ async fn handle_share_list(
     }
 }
 
+/// Normalize a share slug the way the server does before comparing names:
+/// trim ONLY space, tab, newline, carriage return, NUL and vertical tab from
+/// both ends, then lowercase.
+///
+/// Deliberately not [`str::trim`], which also strips other Unicode whitespace
+/// (a non-breaking space, for one) that the server's normalization keeps.
+fn normalize_share_slug(raw: &str) -> String {
+    raw.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0B'))
+        .to_lowercase()
+}
+
+/// The stored `custom_name` from a share-details response, if any.
+///
+/// The details payload nests the share under `share`; a bare share object is
+/// accepted too so the read does not depend on which envelope shape arrived.
+fn stored_share_custom_name(details: &Value) -> Option<&str> {
+    details
+        .get("share")
+        .and_then(|s| s.get("custom_name"))
+        .or_else(|| details.get("custom_name"))
+        .and_then(Value::as_str)
+}
+
 async fn handle_share_create(
     state: &McpState,
     args: &Map<String, Value>,
 ) -> Result<CallToolResult, McpError> {
+    // Custom share names can no longer be set. Refuse the key whatever its
+    // value (JSON null included) so a create never silently drops it.
+    if args.contains_key("custom_name") {
+        return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG));
+    }
     // Deep Indexing is required server-side; default to false (off).
     // STRICT: a present non-bool must not be read as absent — see the
     // silent-default sweep note on `optional_str_strict`.
@@ -8797,7 +8847,6 @@ async fn handle_share_create(
             folder_node_id: optional_str(args, "folder_node_id"),
             create_folder: optional_bool(args, "create_folder"),
             folder_name: optional_str(args, "folder_name"),
-            custom_name: optional_str(args, "custom_name"),
             password: optional_str(args, "password"),
             expires: optional_str(args, "expires"),
             notify: optional_str(args, "notify"),
@@ -8857,13 +8906,39 @@ async fn handle_share_update(
             "Invalid download_security value: must be \"high\", \"medium\", or \"off\"",
         ));
     }
+    // Custom share names can no longer be set or cleared. The only tolerated
+    // `custom_name` is one that echoes the share's CURRENT name (as a client
+    // round-tripping a fetched share would send); it is then dropped from the
+    // request. Anything else refuses the WHOLE update, so a mixed update never
+    // applies its other fields while silently losing the name change.
+    let echoed_name = match args.get("custom_name") {
+        None => None,
+        Some(Value::String(raw)) => {
+            let normalized = normalize_share_slug(raw);
+            if normalized.is_empty() || normalized == "null" {
+                return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG));
+            }
+            Some(normalized)
+        }
+        Some(_) => return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG)),
+    };
+    if let Some(supplied) = echoed_name {
+        let details = match api::share::get_share_details(&client, share_id).await {
+            Ok(v) => v,
+            Err(e) => return Ok(cli_err_to_result(&e)),
+        };
+        let is_echo = stored_share_custom_name(&details)
+            .is_some_and(|stored| normalize_share_slug(stored) == supplied);
+        if !is_echo {
+            return Ok(error_text(CUSTOM_SHARE_NAME_RETIRED_MSG));
+        }
+    }
     match api::share::update_share(
         &client,
         &api::share::UpdateShareParams {
             share_id,
             name: optional_str(args, "name"),
             title: optional_str(args, "title"),
-            custom_name: optional_str(args, "custom_name"),
             description: optional_str(args, "description"),
             share_type: optional_str(args, "share_type"),
             access_options: optional_str(args, "access_options"),
@@ -9093,21 +9168,6 @@ async fn handle_share_available(
     }
 }
 
-async fn handle_share_check_name(
-    state: &McpState,
-    args: &Map<String, Value>,
-) -> Result<CallToolResult, McpError> {
-    let client = state.client().read().await;
-    let name = match required_str(args, "name") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    match api::share::check_share_name(&client, name).await {
-        Ok(v) => Ok(success_json(&v)),
-        Err(e) => Ok(cli_err_to_result(&e)),
-    }
-}
-
 /// AI tool handler.
 async fn handle_ai(
     state: &McpState,
@@ -9129,7 +9189,6 @@ async fn handle_ai(
         "message-send" => handle_ai_message_send(state, args).await,
         "message-list" => handle_ai_message_list(state, args).await,
         "message-details" | "message-read" => handle_ai_message_details(state, args).await,
-        "share-generate" => handle_ai_share_generate(state, args).await,
         "transactions" => handle_ai_transactions(state, args).await,
         "autotitle" => handle_ai_autotitle(state, args).await,
         _ => Ok(error_text(&format!("Unknown ripley action: {action}"))),
@@ -9655,69 +9714,6 @@ async fn handle_ai_message_details(
     }
 }
 
-async fn handle_ai_share_generate(
-    state: &McpState,
-    args: &Map<String, Value>,
-) -> Result<CallToolResult, McpError> {
-    let client = state.client().read().await;
-    let ctx_type = match optional_str_strict(args, "context_type") {
-        Ok(v) => v.unwrap_or("workspace"),
-        Err(e) => return Ok(e),
-    };
-    let ctx_id = match required_str(args, "context_id") {
-        Ok(v) => v,
-        Err(e) => return Ok(e),
-    };
-    // Both workspace and share contexts use the same form contract: a single
-    // `files` field whose value is a JSON-array string of file IDs (NOT a
-    // `nodes` CSV). Accept the IDs from either `files` or the legacy
-    // `node_ids` arg for back-compat. `files` may be either a CSV string or a
-    // JSON-array string (e.g. `["id1","id2"]`); both are accepted.
-    let Some(ids_str) = optional_str(args, "files").or_else(|| optional_str(args, "node_ids"))
-    else {
-        return Ok(error_text(
-            "share-generate requires `files` (comma-separated or JSON-array of file IDs)",
-        ));
-    };
-    let trimmed = ids_str.trim();
-    let file_ids: Vec<String> = if trimmed.starts_with('[') {
-        match serde_json::from_str::<Vec<String>>(trimmed) {
-            Ok(v) => v
-                .into_iter()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            Err(e) => {
-                return Ok(error_text(&format!(
-                    "share-generate `files` looked like a JSON array but failed to parse: {e}"
-                )));
-            }
-        }
-    } else {
-        trimmed
-            .split(',')
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-    if file_ids.is_empty() {
-        return Ok(error_text("share-generate requires at least one file ID"));
-    }
-    // The `/ai/share/` endpoint caps `files` at 1-25 per the docs; reject
-    // oversized requests before the network round-trip.
-    if file_ids.len() > 25 {
-        return Ok(error_text(&format!(
-            "too many files: {} supplied, but AI share accepts at most 25",
-            file_ids.len()
-        )));
-    }
-    let form = api::ai::build_share_form(&file_ids);
-    match api::ai::ai_api_form(&client, ctx_type, ctx_id, "share/", &form).await {
-        Ok(v) => Ok(success_json(&v)),
-        Err(e) => Ok(cli_err_to_result(&e)),
-    }
-}
-
 async fn handle_ai_transactions(
     state: &McpState,
     args: &Map<String, Value>,
@@ -10090,6 +10086,13 @@ fn json_value_id_to_string(v: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+/// The message every `sign` call returns: e-signatures are no longer available.
+const SIGN_DISABLED_MSG: &str = "E-signatures are no longer available.";
+
+/// The message a `share` create/update returns when it would set or clear a
+/// custom share name: custom share URLs can no longer be set.
+const CUSTOM_SHARE_NAME_RETIRED_MSG: &str = "Custom share URLs are no longer supported.";
 
 /// The message a disabled cloud-import surface returns.
 ///
@@ -15674,16 +15677,6 @@ mod ripley_tool_tests {
         );
     }
 
-    #[test]
-    fn share_form_helper_builds_files_json_array() {
-        // The MCP share-generate handler delegates to this shared builder;
-        // confirm the body shape it produces is the JSON `files` array.
-        let form = super::api::ai::build_share_form(&["x".to_owned(), "y".to_owned()]);
-        assert_eq!(form.get("files").map(String::as_str), Some(r#"["x","y"]"#));
-        assert!(!form.contains_key("nodes"));
-        let _ = json!({}); // silence unused import if other asserts change
-    }
-
     #[tokio::test]
     async fn ai_chat_create_without_question_errors() {
         // The API docs make `question` required for create; the handler must
@@ -15701,58 +15694,6 @@ mod ripley_tool_tests {
         assert!(
             text.contains("query_text"),
             "create without question must surface a missing query_text error, got: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn ai_share_generate_rejects_more_than_25_files() {
-        // The API docs cap `files` at 1-25; the handler must reject >25
-        // client-side before the network round-trip.
-        let router = authed_router().await;
-        let ids: Vec<String> = (0..26).map(|i| format!("id{i}")).collect();
-        let mut args = Map::new();
-        args.insert(
-            "action".to_owned(),
-            Value::String("share-generate".to_owned()),
-        );
-        args.insert("context_id".to_owned(), Value::String("ws1".to_owned()));
-        args.insert("files".to_owned(), Value::String(ids.join(",")));
-        let res = router
-            .call_tool("ripley", args)
-            .await
-            .expect("call_tool ok");
-        let text = result_to_string(&res);
-        assert!(
-            text.contains("too many files") && text.contains("25"),
-            "share-generate with 26 files must be rejected, got: {text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn ai_share_generate_accepts_json_array_files() {
-        // `files` may be a JSON-array string; confirm it parses (a single id
-        // is well under the cap, so this passes validation and proceeds to the
-        // network attempt — which then fails, but NOT with a parse/validation
-        // error).
-        let router = authed_router().await;
-        let mut args = Map::new();
-        args.insert(
-            "action".to_owned(),
-            Value::String("share-generate".to_owned()),
-        );
-        args.insert("context_id".to_owned(), Value::String("ws1".to_owned()));
-        args.insert(
-            "files".to_owned(),
-            Value::String(r#"["abc","def"]"#.to_owned()),
-        );
-        let res = router
-            .call_tool("ripley", args)
-            .await
-            .expect("call_tool ok");
-        let text = result_to_string(&res);
-        assert!(
-            !text.contains("failed to parse") && !text.contains("at least one file ID"),
-            "JSON-array files should parse cleanly, got: {text}"
         );
     }
 
@@ -15790,12 +15731,10 @@ mod ripley_tool_tests {
             .find(|t| t.name.as_ref() == "ripley")
             .expect("ripley tool present");
         let schema = serde_json::to_string(&ripley.input_schema).unwrap_or_default();
-        for action in ["ask", "share-generate"] {
-            assert!(
-                schema.contains(action),
-                "ripley schema must advertise the `{action}` action, got: {schema}"
-            );
-        }
+        assert!(
+            schema.contains("ask"),
+            "ripley schema must advertise the `ask` action, got: {schema}"
+        );
         // The retired self-only AI-memory actions must NOT be advertised —
         // agent memory was removed from public API access.
         for retired in ["memory-get", "memory-set", "memory-delete"] {
@@ -15819,6 +15758,13 @@ mod ripley_tool_tests {
             !actions.contains(&"search"),
             "ripley must NOT advertise `search` — searching moved to the \
              dedicated `search` tool, got: {actions:?}"
+        );
+        // `share-generate` was retired with the AI Share link endpoint.
+        // Checked against the action list for the same reason as `search`.
+        assert!(
+            !actions.contains(&"share-generate"),
+            "ripley must NOT advertise the retired `share-generate` action, \
+             got: {actions:?}"
         );
     }
 
@@ -16062,6 +16008,14 @@ mod ripley_tool_tests {
         "metadata-update",
     ];
 
+    /// Retired actions of the `share` tool. Same contract as
+    /// [`DEAD_METADATA_ACTIONS`].
+    const DEAD_SHARE_ACTIONS: &[&str] = &[
+        // `check-name` — removed 2026-11-17: custom share names can no longer
+        // be set, so there is nothing to check availability for.
+        "check-name",
+    ];
+
     /// Retired actions of the `ripley` tool. Same contract as
     /// [`DEAD_METADATA_ACTIONS`].
     const DEAD_RIPLEY_ACTIONS: &[&str] = &[
@@ -16072,6 +16026,10 @@ mod ripley_tool_tests {
         // which covers BOTH the workspace and share contexts this action used
         // to serve.
         "search",
+        // `share-generate` — removed 2026-11-17 with the AI Share link
+        // endpoint (`POST /{workspace,share}/{id}/ai/share/`), which the
+        // platform is retiring. There is no successor action.
+        "share-generate",
     ];
 
     fn metadata_tool_actions() -> Vec<&'static str> {
@@ -16536,6 +16494,15 @@ mod ripley_tool_tests {
             assert!(
                 text.contains("Unknown workspace action"),
                 "`{action}` was retired from the `workspace` tool but its handler \
+                 arm still dispatches — hidden but callable: {text}"
+            );
+        }
+
+        for action in DEAD_SHARE_ACTIONS.iter().copied() {
+            let text = dispatch_action(&router, "share", action).await;
+            assert!(
+                text.contains("Unknown share action"),
+                "`{action}` was retired from the `share` tool but its handler \
                  arm still dispatches — hidden but callable: {text}"
             );
         }
@@ -17313,6 +17280,33 @@ mod ripley_tool_tests {
                 "`{retired}` is retired but still advertised on the workspace tool"
             );
         }
+    }
+
+    #[test]
+    fn retired_share_name_surface_is_not_advertised() {
+        // `dead_actions_are_really_gone` proves the `check-name` arm is gone;
+        // this pins that the share SCHEMA stopped naming it and the retired
+        // `custom_name` param.
+        let def = super::TOOL_DEFS
+            .iter()
+            .find(|d| d.name == "share")
+            .expect("share tool present");
+        for retired in DEAD_SHARE_ACTIONS {
+            assert!(
+                !def.actions.contains(retired),
+                "`{retired}` is retired but still advertised on the share tool"
+            );
+        }
+        assert!(
+            def.params.iter().all(|(name, _, _)| *name != "custom_name"),
+            "`custom_name` is retired but still advertised on the share tool"
+        );
+        // The workspace tool's own `check-name` is unrelated and stays.
+        let ws = super::TOOL_DEFS
+            .iter()
+            .find(|d| d.name == "workspace")
+            .expect("workspace tool present");
+        assert!(ws.actions.contains(&"check-name"));
     }
 
     #[test]
@@ -18419,6 +18413,86 @@ mod ripley_tool_tests {
         );
     }
 
+    /// The production router hides `sign` from the advertised surface.
+    #[test]
+    fn production_router_hides_sign() {
+        let router = ToolRouter::new(
+            Arc::new(McpState::new_unauthenticated_for_test(
+                "https://api.fast.io/current",
+            )),
+            None,
+        );
+        assert!(
+            !router.visible_tool_names().contains(&"sign"),
+            "sign must not be visible on the production router"
+        );
+        assert!(
+            !router
+                .list_tools()
+                .tools
+                .iter()
+                .any(|t| t.name.as_ref() == "sign"),
+            "sign must not be listed on the production router"
+        );
+    }
+
+    /// With e-signatures disabled, `sign` is absent from `list_tools`, and
+    /// `--tools sign` alone leaves nothing visible.
+    #[test]
+    fn sign_hidden_when_disabled() {
+        let router = filtered_router(true, None).with_sign_enabled(false);
+        assert!(
+            !router
+                .list_tools()
+                .tools
+                .iter()
+                .any(|t| t.name.as_ref() == "sign"),
+            "sign must not be advertised when disabled"
+        );
+        assert!(!router.visible_tool_names().contains(&"sign"));
+        assert!(
+            !filtered_router(true, filter_of(&["sign"]))
+                .with_sign_enabled(false)
+                .has_visible_tools(),
+            "`--tools sign` with sign disabled has no visible tools"
+        );
+        assert!(
+            filtered_router(true, filter_of(&["sign"]))
+                .with_sign_enabled(true)
+                .has_visible_tools(),
+            "control: `--tools sign` with sign enabled is visible"
+        );
+    }
+
+    /// Every `sign` action — describe included — is refused before auth when
+    /// e-signatures are disabled, on both unauthenticated and authenticated
+    /// routers.
+    #[tokio::test]
+    async fn sign_calls_refused_when_disabled() {
+        let routers = [
+            unauthed_router().with_sign_enabled(false),
+            authed_router().await.with_sign_enabled(false),
+        ];
+        for router in &routers {
+            for action in ["describe", "envelope-list", "envelope-create"] {
+                let mut args = Map::new();
+                args.insert("action".to_owned(), Value::String(action.to_owned()));
+                args.insert("workspace_id".to_owned(), Value::String("ws1".to_owned()));
+                let res = router.call_tool("sign", args).await.expect("call_tool ok");
+                assert_eq!(res.is_error, Some(true), "{action} must be an error");
+                let text = result_to_string(&res);
+                assert!(
+                    text.contains(super::SIGN_DISABLED_MSG),
+                    "{action} must return the disabled message, got: {text}"
+                );
+                assert!(
+                    !text.contains("Not authenticated"),
+                    "{action}: the gate must fire before auth, got: {text}"
+                );
+            }
+        }
+    }
+
     /// `visible_tool_names` returns exactly the advertised set (canonical names,
     /// `TOOL_DEFS` order), honoring both gates — the source the server intro uses
     /// to enumerate a filtered surface.
@@ -18446,9 +18520,9 @@ mod ripley_tool_tests {
         }
     }
 
-    /// A `None` filter (the default) leaves the full surface intact — every
-    /// registered tool is advertised, matching the un-filtered production
-    /// behavior.
+    /// A `None` filter (the default) leaves the full production surface intact
+    /// — every registered tool except the gated-off `sign` is advertised
+    /// (cloud import enabled here).
     #[test]
     fn filter_none_is_full_surface() {
         let router = filtered_router(true, None);
@@ -18458,17 +18532,18 @@ mod ripley_tool_tests {
             .iter()
             .map(|t| t.name.as_ref().to_owned())
             .collect();
-        for def in TOOL_DEFS {
+        for def in TOOL_DEFS.iter().filter(|d| d.name != "sign") {
             assert!(
                 names.contains(def.name),
-                "None filter must advertise every tool; missing '{}'",
+                "None filter must advertise every ungated tool; missing '{}'",
                 def.name
             );
         }
+        assert!(!names.contains("sign"), "sign is gated off in production");
         assert_eq!(
             names.len(),
-            TOOL_DEFS.len(),
-            "None filter advertises exactly the full TOOL_DEFS surface"
+            TOOL_DEFS.len() - 1,
+            "None filter advertises exactly TOOL_DEFS minus sign"
         );
     }
 
@@ -19912,7 +19987,9 @@ mod ripley_tool_tests {
     /// router, and none may return an error.
     #[tokio::test]
     async fn every_tool_describes_without_auth() {
-        let router = filtered_router(true, None);
+        // Sign gate opened so `sign`'s describe payload stays covered; the
+        // refusal with the gate closed is locked by `sign_calls_refused_when_disabled`.
+        let router = filtered_router(true, None).with_sign_enabled(true);
         for def in super::TOOL_DEFS {
             let mut args = Map::new();
             args.insert("action".to_owned(), Value::String("describe".to_owned()));
@@ -23630,6 +23707,234 @@ mod ripley_tool_tests {
         )));
         state.set_token("test-token".to_owned()).await;
         (ToolRouter::new_for_tests(state), seen)
+    }
+
+    // ─── Share custom names ────────────────────────────────────────────────
+
+    const SHARE_ID: &str = "1234567890123456789";
+
+    /// Call `share` `action` with `pairs` on `router`; return (`is_error`, text).
+    async fn call_share(
+        router: &ToolRouter,
+        action: &str,
+        pairs: &[(&str, Value)],
+    ) -> (bool, String) {
+        let res = router
+            .call_tool("share", comment_args(action, pairs))
+            .await
+            .expect("call_tool ok");
+        (res.is_error == Some(true), result_to_string(&res))
+    }
+
+    fn seen_lines(seen: &Arc<std::sync::Mutex<Vec<(String, String)>>>) -> Vec<(String, String)> {
+        seen.lock().expect("capture lock").clone()
+    }
+
+    #[test]
+    fn share_slug_normalization_trims_only_the_server_set_and_lowercases() {
+        assert_eq!(
+            super::normalize_share_slug(" \t\n\r\0\x0BQ4-Reports \t\n\r\0\x0B"),
+            "q4-reports"
+        );
+        // A non-breaking space is NOT in the trimmed set (unlike `str::trim`).
+        assert_eq!(
+            super::normalize_share_slug("\u{a0}Q4\u{a0}"),
+            "\u{a0}q4\u{a0}"
+        );
+        // Interior whitespace is kept.
+        assert_eq!(super::normalize_share_slug(" A b "), "a b");
+        assert_eq!(super::normalize_share_slug(" NULL "), "null");
+    }
+
+    #[tokio::test]
+    async fn share_create_refuses_custom_name_whatever_its_value() {
+        for value in [json!("x"), json!(""), json!("null"), json!(5), Value::Null] {
+            let (router, seen) = capturing_router(json!({"result": true})).await;
+            let (is_err, text) = call_share(
+                &router,
+                "create",
+                &[
+                    ("workspace_id", json!(SHARE_ID)),
+                    ("name", json!("Quarterly")),
+                    ("custom_name", value.clone()),
+                ],
+            )
+            .await;
+            assert!(is_err, "custom_name = {value} must be refused: {text}");
+            assert!(
+                text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+                "custom_name = {value}: got {text}"
+            );
+            assert!(
+                seen_lines(&seen).is_empty(),
+                "custom_name = {value}: a refused create must send nothing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn share_create_without_custom_name_still_reaches_the_server() {
+        // Positive control for the refusal above.
+        let (router, seen) = capturing_router(json!({"result": true})).await;
+        let (is_err, text) = call_share(
+            &router,
+            "create",
+            &[
+                ("workspace_id", json!(SHARE_ID)),
+                ("name", json!("Quarterly")),
+            ],
+        )
+        .await;
+        assert!(!is_err, "create without custom_name must succeed: {text}");
+        let lines = seen_lines(&seen);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].0.starts_with("POST "), "{lines:?}");
+        assert!(!lines[0].1.contains("custom_name"), "{lines:?}");
+    }
+
+    fn stored_share_reply() -> Value {
+        json!({"result": true, "share": {"id": SHARE_ID, "custom_name": "q4-reports"}})
+    }
+
+    #[tokio::test]
+    async fn share_update_refuses_a_name_change_after_one_read() {
+        // A different name, alone or mixed with another field: the whole
+        // update is refused after the single details read, and nothing is
+        // POSTed (so `title` is not applied either).
+        for pairs in [
+            vec![("custom_name", json!("other"))],
+            vec![("title", json!("T")), ("custom_name", json!("other"))],
+        ] {
+            let (router, seen) = capturing_router(stored_share_reply()).await;
+            let mut args = vec![("share_id", json!(SHARE_ID))];
+            args.extend(pairs.iter().cloned());
+            let (is_err, text) = call_share(&router, "update", &args).await;
+            assert!(is_err, "{pairs:?} must be refused: {text}");
+            assert!(
+                text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+                "{pairs:?}: {text}"
+            );
+            let lines = seen_lines(&seen);
+            assert_eq!(lines.len(), 1, "{pairs:?}: only the read: {lines:?}");
+            assert!(
+                lines[0].0.starts_with("GET ")
+                    && lines[0].0.contains(&format!("/share/{SHARE_ID}/details/")),
+                "{pairs:?}: {lines:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn share_update_drops_an_echo_of_the_stored_name() {
+        for (pairs, title) in [
+            // Case and server-trimmed padding still match.
+            (vec![("custom_name", json!("  Q4-Reports\n"))], false),
+            (
+                vec![("title", json!("T")), ("custom_name", json!("q4-reports"))],
+                true,
+            ),
+        ] {
+            let (router, seen) = capturing_router(stored_share_reply()).await;
+            let mut args = vec![("share_id", json!(SHARE_ID))];
+            args.extend(pairs.iter().cloned());
+            let (is_err, text) = call_share(&router, "update", &args).await;
+            assert!(!is_err, "{pairs:?}: an echo must not be refused: {text}");
+            let lines = seen_lines(&seen);
+            assert_eq!(lines.len(), 2, "{pairs:?}: read then update: {lines:?}");
+            assert!(
+                lines[0].0.starts_with("GET ") && lines[0].0.contains("/details/"),
+                "{pairs:?}: {lines:?}"
+            );
+            assert!(
+                lines[1].0.starts_with("POST ")
+                    && lines[1].0.contains(&format!("/share/{SHARE_ID}/update/")),
+                "{pairs:?}: {lines:?}"
+            );
+            assert!(
+                !lines[1].1.contains("custom_name"),
+                "{pairs:?}: the echoed name must be dropped from the update: {lines:?}"
+            );
+            if title {
+                assert!(lines[1].1.contains("title=T"), "{pairs:?}: {lines:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn share_update_refuses_a_clear_or_non_string_name_without_a_request() {
+        for value in [
+            json!(""),
+            json!("null"),
+            json!(" NULL\t"),
+            json!(7),
+            Value::Null,
+        ] {
+            let (router, seen) = capturing_router(stored_share_reply()).await;
+            let (is_err, text) = call_share(
+                &router,
+                "update",
+                &[
+                    ("share_id", json!(SHARE_ID)),
+                    ("custom_name", value.clone()),
+                ],
+            )
+            .await;
+            assert!(is_err, "custom_name = {value} must be refused: {text}");
+            assert!(
+                text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+                "custom_name = {value}: {text}"
+            );
+            assert!(
+                seen_lines(&seen).is_empty(),
+                "custom_name = {value}: must be refused before any request"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn share_update_refuses_a_name_when_the_share_has_none() {
+        let (router, seen) =
+            capturing_router(json!({"result": true, "share": {"id": SHARE_ID}})).await;
+        let (is_err, text) = call_share(
+            &router,
+            "update",
+            &[("share_id", json!(SHARE_ID)), ("custom_name", json!("x"))],
+        )
+        .await;
+        assert!(is_err, "must be refused: {text}");
+        assert!(
+            text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+            "{text}"
+        );
+        let lines = seen_lines(&seen);
+        assert_eq!(lines.len(), 1, "only the read: {lines:?}");
+        assert!(lines[0].0.starts_with("GET "), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn share_update_surfaces_a_failed_read_and_sends_no_update() {
+        let (router, seen) = capturing_router_with_status(
+            404,
+            json!({"result": "no", "error": {"code": 1609, "text": "Share not found"}}),
+        )
+        .await;
+        let (is_err, text) = call_share(
+            &router,
+            "update",
+            &[("share_id", json!(SHARE_ID)), ("custom_name", json!("x"))],
+        )
+        .await;
+        assert!(is_err, "a failed read must be an error: {text}");
+        assert!(
+            !text.contains(super::CUSTOM_SHARE_NAME_RETIRED_MSG),
+            "the read failure, not the refusal, must surface: {text}"
+        );
+        assert!(
+            seen_lines(&seen)
+                .iter()
+                .all(|(line, _)| !line.starts_with("POST ")),
+            "no update may be sent after a failed read"
+        );
     }
 
     fn comment_args(action: &str, pairs: &[(&str, Value)]) -> Map<String, Value> {

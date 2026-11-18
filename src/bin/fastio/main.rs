@@ -269,6 +269,14 @@ fn import_gate_blocks(command: &Commands, cloud_import_enabled: bool) -> bool {
     matches!(command, Commands::Import(_)) && !cloud_import_enabled
 }
 
+/// Whether the e-signature gate blocks this command.
+///
+/// E-signatures are no longer available, so every `sign` subcommand is
+/// refused before any configuration or network access.
+fn sign_gate_blocks(command: &Commands) -> bool {
+    matches!(command, Commands::Sign(_))
+}
+
 /// Core logic extracted so we can intercept errors in `main()`.
 async fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -321,6 +329,16 @@ async fn run() -> Result<()> {
         return Err(fastio_cli::error::CliError::FeatureDisabled {
             message: "Cloud import is not yet available.",
             hint: "Set FASTIO_ENABLE_CLOUD_IMPORT=1 to use import commands (cloud import must also be enabled for your workspace).",
+        }
+        .into());
+    }
+
+    // E-signatures are no longer available: refuse every `sign` command before
+    // config/profile resolution so no request is ever made.
+    if sign_gate_blocks(&cli.command) {
+        return Err(fastio_cli::error::CliError::FeatureDisabled {
+            message: "E-signatures are no longer available.",
+            hint: "Run `fastio --help` to see the available commands.",
         }
         .into());
     }
@@ -1725,7 +1743,6 @@ fn map_share_command(cmd: cli::ShareCommands) -> ShareCommand {
             folder_node_id,
             create_folder,
             folder_name,
-            custom_name,
             password,
             expires,
             notify,
@@ -1755,7 +1772,6 @@ fn map_share_command(cmd: cli::ShareCommands) -> ShareCommand {
             folder_node_id,
             create_folder,
             folder_name,
-            custom_name,
             password,
             expires,
             notify,
@@ -1780,7 +1796,6 @@ fn map_share_command(cmd: cli::ShareCommands) -> ShareCommand {
             share_id,
             name,
             title,
-            custom_name,
             description,
             share_type,
             access_options,
@@ -1809,7 +1824,6 @@ fn map_share_command(cmd: cli::ShareCommands) -> ShareCommand {
             share_id,
             name,
             title,
-            custom_name,
             description,
             share_type,
             access_options,
@@ -1846,7 +1860,6 @@ fn map_share_command(cmd: cli::ShareCommands) -> ShareCommand {
         cli::ShareCommands::GuestAuth { share_id } => ShareCommand::GuestAuth { share_id },
         cli::ShareCommands::PublicInfo { share_id } => ShareCommand::PublicInfo { share_id },
         cli::ShareCommands::Available => ShareCommand::Available,
-        cli::ShareCommands::CheckName { name } => ShareCommand::CheckName { name },
         cli::ShareCommands::Files(f) => ShareCommand::Files(map_share_files_command(f)),
         cli::ShareCommands::Members(m) => ShareCommand::Members(map_share_members_command(m)),
         cli::ShareCommands::Invitation(i) => {
@@ -2492,13 +2505,6 @@ fn map_ripley_command(cmd: cli::RipleyCommands) -> AiCommand {
             chat_id,
             limit,
             offset,
-        },
-        cli::RipleyCommands::Summary {
-            workspace,
-            node_ids,
-        } => AiCommand::Summary {
-            workspace,
-            node_ids,
         },
         cli::RipleyCommands::Cancel {
             workspace,
@@ -3394,6 +3400,38 @@ mod tests {
             !import_gate_blocks(&sign, false),
             "the import gate must not block sign"
         );
+    }
+
+    /// The e-signature gate blocks every `sign` command and nothing else.
+    #[test]
+    fn sign_gate_blocks_only_sign() {
+        use super::sign_gate_blocks;
+        use crate::cli::Cli;
+        use clap::Parser;
+
+        let parse = |argv: &[&str]| Cli::try_parse_from(argv).expect("command parses").command;
+        for argv in [
+            &["fastio", "sign", "envelope", "list", "--workspace", "1"][..],
+            &[
+                "fastio",
+                "sign",
+                "envelope",
+                "get",
+                "--workspace",
+                "1",
+                "env1",
+            ][..],
+            &["fastio", "sign", "template", "list", "--workspace", "1"][..],
+        ] {
+            assert!(sign_gate_blocks(&parse(argv)), "must block {argv:?}");
+        }
+        for argv in [
+            &["fastio", "import", "list-providers", "--workspace", "1"][..],
+            &["fastio", "org", "list"][..],
+            &["fastio", "workspace", "list"][..],
+        ] {
+            assert!(!sign_gate_blocks(&parse(argv)), "must not block {argv:?}");
+        }
     }
 
     /// Either removed password flag — alone or together — reaches the command

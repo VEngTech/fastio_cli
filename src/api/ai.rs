@@ -3,7 +3,7 @@
 /// AI API endpoints for the Fast.io REST API.
 ///
 /// Maps to endpoints documented at `/current/workspace/{id}/ai/`.
-/// Supports chat creation, message send/read, and summarize. Search is NOT an
+/// Supports chat creation and message send/read. Search is NOT an
 /// AI endpoint — see [`crate::api::search`] for the unified `/search/` family.
 use std::collections::HashMap;
 
@@ -726,49 +726,11 @@ fn agent_chat_path(
 // the primary surface, and `api::storage::search_files` is the flat
 // filename/content leg. Do not add a third one here.
 
-/// Generate a shareable AI summary from specific workspace files.
-///
-/// `POST /workspace/{workspace_id}/ai/share/`
-///
-/// Requires 1-25 file opaque IDs. The endpoint reads **form-encoded** input
-/// and the `files` field must be a **JSON-encoded array string** of node
-/// opaque IDs, e.g. `files=["id1","id2"]` (NOT a comma-separated `nodes`
-/// CSV — see the published API docs). The API generates AI-powered markdown
-/// with temporary download URLs that can be pasted into an external chatbot.
-pub async fn summarize(
-    client: &ApiClient,
-    workspace_id: &str,
-    file_ids: &[String],
-) -> Result<Value, CliError> {
-    let path = format!("/workspace/{}/ai/share/", urlencoding::encode(workspace_id),);
-    client.post(&path, &build_share_form(file_ids)).await
-}
-
-/// Build the form body for the `ai/share/` (share-generate) endpoint:
-/// a single `files` field whose value is a JSON-array string of node IDs.
-///
-/// Shared by the CLI `summarize` builder and the MCP `share-generate`
-/// handler so both contexts (workspace + share) emit identical, correct
-/// bodies. `serde_json::to_string` of a `Vec<String>` never fails, so the
-/// empty/fallback arm exists only to satisfy the type.
-///
-/// This builder does NOT enforce the API's documented 1-25 `files` bound —
-/// callers are responsible for the client-side length check before calling
-/// this; both the CLI `summary` handler and the MCP `share-generate` handler
-/// reject `> 25` (and empty) before the network round-trip.
-#[must_use]
-pub fn build_share_form(file_ids: &[String]) -> HashMap<String, String> {
-    let mut form = HashMap::new();
-    let json = serde_json::to_string(file_ids).unwrap_or_else(|_| "[]".to_owned());
-    form.insert("files".to_owned(), json);
-    form
-}
-
 /// Generic AI API call that supports both workspace and share context.
 ///
 /// Routes to `/{context_type}/{context_id}/ai/{sub_path}`. POST bodies sent
-/// through this helper are **JSON**; the `/ai/agent/` create/send and
-/// `ai/share/` endpoints require form encoding, so those callers must use
+/// through this helper are **JSON**; the `/ai/agent/` create/send
+/// endpoints require form encoding, so those callers must use
 /// [`ai_api_form`] instead. This helper remains for the GET/DELETE actions
 /// (list/details/messages/delete) and the genuinely-JSON-free POSTs
 /// (publish/autotitle) where the server tolerates an empty/JSON body.
@@ -808,8 +770,7 @@ pub async fn ai_api(
 }
 
 /// Form-encoded POST variant of [`ai_api`] for the workspace/share-context
-/// `/ai/agent/` create + follow-up message endpoints and the `ai/share/`
-/// share-generate endpoint, all of which read
+/// `/ai/agent/` create + follow-up message endpoints, which read
 /// `application/x-www-form-urlencoded` bodies per the published API docs.
 #[allow(clippy::implicit_hasher)]
 pub async fn ai_api_form(
@@ -1156,9 +1117,9 @@ mod tests {
 
     use super::{
         CONVERSATION_TOO_LARGE_CODES, ChatCreateOptions, ChatScope, agent_chat_path,
-        answer_was_truncated, build_cancel_path, build_references, build_share_form,
-        build_subjects, extract_answer_text, extract_clarification_question,
-        is_terminal_turn_status, message_detail, parse_cancel_response, turn_status,
+        answer_was_truncated, build_cancel_path, build_references, build_subjects,
+        extract_answer_text, extract_clarification_question, is_terminal_turn_status,
+        message_detail, parse_cancel_response, turn_status,
     };
     use crate::error::CliError;
     use serde_json::{Value, json};
@@ -1723,24 +1684,6 @@ mod tests {
             subs,
             json!([{"type": "file", "id": "a1", "file_details": {"node_id": "a1", "version_id": "v1"}}])
         );
-    }
-
-    #[test]
-    fn share_form_sends_files_json_array_not_nodes_csv() {
-        let ids = vec!["aBc".to_owned(), "dEf".to_owned()];
-        let form = build_share_form(&ids);
-        assert_eq!(
-            form.get("files").map(String::as_str),
-            Some(r#"["aBc","dEf"]"#)
-        );
-        // Must NOT use the retired `nodes` CSV field.
-        assert!(!form.contains_key("nodes"));
-    }
-
-    #[test]
-    fn share_form_single_file_is_valid_json_array() {
-        let form = build_share_form(&["only".to_owned()]);
-        assert_eq!(form.get("files").map(String::as_str), Some(r#"["only"]"#));
     }
 
     #[test]

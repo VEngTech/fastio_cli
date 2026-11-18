@@ -361,7 +361,6 @@ fastio ripley chat --workspace WS_ID --chat-id CHAT_ID "Continue"   # follow-up
 fastio ripley list --workspace WS_ID --kind all          # chats
 fastio ripley details CHAT_ID --workspace WS_ID
 fastio ripley messages CHAT_ID --workspace WS_ID
-fastio ripley summary --workspace WS_ID NODE_ID1 NODE_ID2     # AI share
 ```
 
 ### Unified search
@@ -622,24 +621,6 @@ given `output_path` and a finished `download`-destination export, it saves the
 file locally. A failed export is returned as an error result, with its record
 and hint. Neither action returns credentials or a download URL.
 
-## E-signature
-
-`fastio sign` and the `sign` MCP tool drive **`SignEnvelopes`** — PDFs sent to
-recipients for electronic signature. Every envelope is parented to a
-**workspace**, so each subcommand takes a required `--workspace <id>`.
-
-Signing is available on **every plan**. The org resource exposes
-`capabilities.signing` (boolean) to confirm availability, and the server rejects
-calls with a feature-disabled error if an org's plan does not grant it — a `403`
-with error code `1670` ("Signing is not enabled for this organization"). Access
-also requires workspace membership.
-
-Over MCP the `sign` tool exposes reads, reversible draft-drive actions, and the
-idempotent recovery actions. The outward-facing and terminal actions — `send`
-(which emails real recipients) and `void` — are **CLI-binary-only**
-(`fastio sign envelope send|void …`), as are `template create|update|delete`.
-Envelopes are voided, never deleted.
-
 ## File Shares
 
 `fastio fileshare` creates **durable, link-shareable views of a SINGLE workspace
@@ -763,7 +744,7 @@ fastio auth status                    # shows account_type: service_account, its
 - It works over plain REST only (no realtime/websocket tokens); poll for changes.
   The built-in `fastio mcp` server works with it for everything its role
   allows.
-- Management and sharing operations (members, invitations, creating shares, File Shares, sign, imports, org changes, permanently purging files or emptying the trash, key/account management) return HTTP `403` with reason `service_account_not_permitted`. Identity reads (`auth status`, `auth check`, `workspace list`) work, and public share links behave as if the request were anonymous.
+- Management and sharing operations (members, invitations, creating shares, File Shares, imports, org changes, permanently purging files or emptying the trash, key/account management) return HTTP `403` with reason `service_account_not_permitted`. Identity reads (`auth status`, `auth check`, `workspace list`) work, and public share links behave as if the request were anonymous.
   Repeating a refused call with the same key never helps — it needs a person's
   credential.
 - **Never paste a service account secret into an MCP tool argument** or any
@@ -839,7 +820,7 @@ fastio mcp
 ```
 
 It speaks MCP over stdio and exposes the CLI's operations as action-routed tools
-(`ripley`, `fileshare`, `files`, `org`, `workspace`, `sign`, …). The `files`
+(`ripley`, `fileshare`, `files`, `org`, `workspace`, …). The `files`
 tool mirrors the three ways to reach a file's words: `read` for raw bytes,
 `content` for one file's extracted text as addressed chunks, and `content-many`
 to score up to 10 files against one question in a single call. Tool results are

@@ -81,8 +81,6 @@ pub struct CreateShareParams<'a> {
     pub create_folder: Option<bool>,
     /// Name for the new backing folder (with `create_folder`).
     pub folder_name: Option<&'a str>,
-    /// URL-friendly custom name (auto-generated when omitted).
-    pub custom_name: Option<&'a str>,
     /// Password for share access (Send + 'Anyone with the link' only).
     pub password: Option<&'a str>,
     /// Expiration datetime `YYYY-MM-DD HH:MM:SS` (portal mode only).
@@ -139,7 +137,6 @@ fn build_create_share_form(params: &CreateShareParams<'_>) -> HashMap<String, St
     put_str(&mut form, "folder_node_id", params.folder_node_id);
     put_bool(&mut form, "create_folder", params.create_folder);
     put_str(&mut form, "folder_name", params.folder_name);
-    put_str(&mut form, "custom_name", params.custom_name);
     put_str(&mut form, "password", params.password);
     put_str(&mut form, "expires", params.expires);
     put_str(&mut form, "notify", params.notify);
@@ -199,8 +196,6 @@ pub struct UpdateShareParams<'a> {
     pub name: Option<&'a str>,
     /// New display title (2-80 chars), or `"null"` to clear.
     pub title: Option<&'a str>,
-    /// New URL-friendly custom name (10-100 chars), or `"null"` to clear.
-    pub custom_name: Option<&'a str>,
     /// New description (10-500 chars), or `"null"`/`""` to clear.
     pub description: Option<&'a str>,
     /// Share direction type: `send`, `receive`, `exchange`.
@@ -257,7 +252,6 @@ fn build_update_share_form(params: &UpdateShareParams<'_>) -> HashMap<String, St
     let mut form = HashMap::new();
     put_str(&mut form, "name", params.name);
     put_str(&mut form, "title", params.title);
-    put_str(&mut form, "custom_name", params.custom_name);
     put_str(&mut form, "description", params.description);
     put_str(&mut form, "share_type", params.share_type);
     put_str(&mut form, "access_options", params.access_options);
@@ -514,14 +508,6 @@ pub async fn available_shares(client: &ApiClient) -> Result<Value, CliError> {
     client.get("/shares/available/").await
 }
 
-/// Check share name availability.
-///
-/// `GET /shares/check/name/{name}/`
-pub async fn check_share_name(client: &ApiClient, name: &str) -> Result<Value, CliError> {
-    let path = format!("/shares/check/name/{}/", urlencoding::encode(name));
-    client.get(&path).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -542,7 +528,6 @@ mod tests {
             folder_node_id: None,
             create_folder: None,
             folder_name: None,
-            custom_name: None,
             password: None,
             expires: None,
             notify: None,
@@ -609,7 +594,6 @@ mod tests {
         p.folder_node_id = Some("node-abc");
         p.create_folder = Some(true);
         p.folder_name = Some("Shared");
-        p.custom_name = Some("my-share");
         p.comments_enabled = Some(true);
         p.guest_chat_enabled = Some(false);
         p.notify = Some("notify_on_file_received");
@@ -629,10 +613,6 @@ mod tests {
         );
         assert_eq!(form.get("create_folder").map(String::as_str), Some("true"));
         assert_eq!(form.get("folder_name").map(String::as_str), Some("Shared"));
-        assert_eq!(
-            form.get("custom_name").map(String::as_str),
-            Some("my-share")
-        );
         assert_eq!(
             form.get("comments_enabled").map(String::as_str),
             Some("true")
@@ -656,7 +636,6 @@ mod tests {
             share_id: "123",
             name: None,
             title: Some("New Title"),
-            custom_name: None,
             description: None,
             share_type: Some("receive"),
             access_options: None,
@@ -713,7 +692,6 @@ mod tests {
             share_id,
             name: None,
             title: None,
-            custom_name: None,
             description: None,
             share_type: None,
             access_options: None,

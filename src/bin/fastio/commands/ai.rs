@@ -1,6 +1,6 @@
 /// Ripley (formerly `ai`) command implementations for `fastio ripley *`.
 ///
-/// Handles AI chat, chat history, and workspace summaries. Search is NOT a
+/// Handles AI chat and chat history. Search is NOT a
 /// Ripley verb — `fastio search workspace` / `fastio search share` (unified,
 /// grouped buckets) is the search surface; `fastio files search` is the flat
 /// filename/content leg.
@@ -209,13 +209,6 @@ pub enum AiCommand {
         offset: Option<u32>,
     },
 
-    /// Generate a shareable AI summary from specific workspace files.
-    Summary {
-        /// Workspace ID.
-        workspace: String,
-        /// File node IDs to include in the summary (at least one required).
-        node_ids: Vec<String>,
-    },
     /// Cancel an in-progress chat message.
     Cancel {
         /// Profile type: `workspace` or `share`.
@@ -392,10 +385,6 @@ pub async fn execute(command: &AiCommand, ctx: &CommandContext<'_>) -> Result<()
             limit,
             offset,
         } => history(ctx, workspace, chat_id.as_deref(), *limit, *offset).await,
-        AiCommand::Summary {
-            workspace,
-            node_ids,
-        } => summary(ctx, workspace, node_ids).await,
         AiCommand::Cancel {
             profile_type,
             profile_id,
@@ -770,31 +759,6 @@ fn truncate_message_items(value: &mut Value, limit: Option<u32>) {
         let n = items.len();
         messages.insert("count".to_owned(), Value::from(n));
     }
-}
-
-/// Generate a shareable AI summary from specific workspace files.
-async fn summary(ctx: &CommandContext<'_>, workspace: &str, node_ids: &[String]) -> Result<()> {
-    anyhow::ensure!(
-        !workspace.trim().is_empty(),
-        "workspace ID must not be empty"
-    );
-    if node_ids.is_empty() {
-        anyhow::bail!("at least one node ID is required (specify file node IDs to summarize)");
-    }
-    // The `/ai/share/` endpoint caps `files` at 1-25 per the published API
-    // docs; reject oversized requests client-side before the network round-trip.
-    anyhow::ensure!(
-        node_ids.len() <= 25,
-        "too many files: {} supplied, but AI share accepts at most 25",
-        node_ids.len()
-    );
-
-    let client = ctx.build_client()?;
-    let value = api::ai::summarize(&client, workspace, node_ids)
-        .await
-        .context("failed to generate AI summary")?;
-    ctx.output.render(&value)?;
-    Ok(())
 }
 
 /// Cancel an in-progress chat message.
